@@ -26,7 +26,16 @@ from bookmark_query import (
 )
 
 
+def _require_writable(action: str) -> None:
+    if read_only_mode():
+        raise SystemExit(
+            f"{action} is disabled when X_BOOKMARKS_READ_ONLY=1. "
+            "Unset it on the writer machine."
+        )
+
+
 def cmd_watch(args: argparse.Namespace) -> None:
+    _require_writable("watch")
     from bookmark_watch import run_watch
 
     result = run_watch(
@@ -47,6 +56,7 @@ def cmd_launchd(args: argparse.Namespace) -> None:
     )
 
     if args.launchd_command == "install":
+        _require_writable("launchd install")
         result = install_launch_agent(
             interval=args.interval,
             base_dir=args.base_dir,
@@ -74,6 +84,7 @@ def cmd_launchd(args: argparse.Namespace) -> None:
 
 
 def cmd_extract(args: argparse.Namespace) -> None:
+    _require_writable("extract")
     print("Phase 1: Content extraction")
     from extract import run_extraction
 
@@ -82,6 +93,7 @@ def cmd_extract(args: argparse.Namespace) -> None:
 
 
 def cmd_categorize(args: argparse.Namespace) -> None:
+    _require_writable("categorize")
     mode = "Regex categorization" if args.regex else "AI categorization"
     print(f"Phase 2: {mode}")
     from categorize import run_categorization
@@ -91,6 +103,7 @@ def cmd_categorize(args: argparse.Namespace) -> None:
 
 
 def cmd_normalize(_args: argparse.Namespace) -> None:
+    _require_writable("normalize")
     print("Phase 2.5: Category normalization")
     from normalize import run_normalization
 
@@ -104,6 +117,7 @@ def cmd_all(args: argparse.Namespace) -> None:
 
 
 def cmd_sync(args: argparse.Namespace) -> None:
+    _require_writable("sync")
     from bookmark_sync import read_stdin_json, sync_bookmarks
 
     stdin_text = read_stdin_json() if args.stdin else None
@@ -132,6 +146,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
 
 
 def cmd_remove(args: argparse.Namespace) -> None:
+    _require_writable("remove")
     from bookmark_sync import remove_bookmarks
 
     result = remove_bookmarks(args.ids)
@@ -146,6 +161,7 @@ def cmd_remove(args: argparse.Namespace) -> None:
 
 
 def cmd_restore(args: argparse.Namespace) -> None:
+    _require_writable("restore")
     from bookmark_sync import restore_bookmarks
 
     ids = [] if args.all else args.ids
@@ -161,6 +177,7 @@ def cmd_restore(args: argparse.Namespace) -> None:
 
 
 def cmd_note(args: argparse.Namespace) -> None:
+    _require_writable("note")
     from bookmark_sync import set_note
 
     text = " ".join(args.text).strip()
@@ -174,6 +191,7 @@ def cmd_note(args: argparse.Namespace) -> None:
 
 
 def cmd_tag(args: argparse.Namespace) -> None:
+    _require_writable("tag")
     from bookmark_sync import add_tags
 
     result = add_tags(args.id, args.tags)
@@ -184,6 +202,7 @@ def cmd_tag(args: argparse.Namespace) -> None:
 
 
 def cmd_untag(args: argparse.Namespace) -> None:
+    _require_writable("untag")
     from bookmark_sync import remove_tags
 
     result = remove_tags(args.id, args.tags)
@@ -194,6 +213,7 @@ def cmd_untag(args: argparse.Namespace) -> None:
 
 
 def cmd_rate(args: argparse.Namespace) -> None:
+    _require_writable("rate")
     from bookmark_sync import set_rating
 
     if not args.clear and args.value is None:
@@ -206,6 +226,7 @@ def cmd_rate(args: argparse.Namespace) -> None:
 
 
 def cmd_hide(args: argparse.Namespace) -> None:
+    _require_writable("hide")
     from bookmark_sync import hide_bookmarks
 
     result = hide_bookmarks(args.ids)
@@ -216,6 +237,7 @@ def cmd_hide(args: argparse.Namespace) -> None:
 
 
 def cmd_unhide(args: argparse.Namespace) -> None:
+    _require_writable("unhide")
     from bookmark_sync import unhide_bookmarks
 
     result = unhide_bookmarks(args.ids)
@@ -309,6 +331,7 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 
 def cmd_refresh(args: argparse.Namespace) -> None:
+    _require_writable("refresh")
     result = refresh_index(force=args.force)
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))

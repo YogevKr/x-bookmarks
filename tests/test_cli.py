@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest import mock
 
-from cli import _augment_result_with_link_context, _auto_refresh, build_parser
+from cli import _augment_result_with_link_context, _auto_refresh, _require_writable, build_parser
 
 
 class CliSurfaceTest(unittest.TestCase):
@@ -89,6 +89,12 @@ class CliSurfaceTest(unittest.TestCase):
     def test_read_only_env_disables_auto_refresh(self) -> None:
         with mock.patch.dict(os.environ, {"X_BOOKMARKS_READ_ONLY": "1"}, clear=False):
             self.assertFalse(_auto_refresh(mock.Mock(no_refresh=False)))
+
+    def test_read_only_env_blocks_write_actions(self) -> None:
+        with mock.patch.dict(os.environ, {"X_BOOKMARKS_READ_ONLY": "1"}, clear=False):
+            with self.assertRaises(SystemExit) as exc:
+                _require_writable("sync")
+        self.assertIn("sync is disabled", str(exc.exception))
 
     def test_extract_parses_force_and_targeting(self) -> None:
         parser = build_parser()

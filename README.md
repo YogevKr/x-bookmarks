@@ -91,6 +91,7 @@ x-bookmarks context 2037620876179537989
 Notes:
 - keep one writer only; do not run `watch` or `sync` on both machines
 - read-only mode disables query auto-refresh on the second machine
+- read-only mode also blocks write commands like `sync`, `refresh`, `watch`, `extract`, and local metadata edits
 - the index is checkpointed after rebuilds so iCloud sync has less SQLite WAL churn
 
 ## Data model

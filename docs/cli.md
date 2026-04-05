@@ -11,6 +11,7 @@ Behavior:
 - The CLI reads data from the current working directory by default.
 - Set `X_BOOKMARKS_HOME=/path/to/data-dir` to target another bookmark workspace.
 - Set `X_BOOKMARKS_READ_ONLY=1` on a second machine to query a synced workspace without auto-refreshing it.
+- In read-only mode, write commands fail fast instead of mutating the shared workspace.
 
 ## Sync
 
