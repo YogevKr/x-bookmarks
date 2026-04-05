@@ -61,6 +61,8 @@ Agent surfaces:
 ```bash
 uv run x-bookmarks mcp
 uv run x-bookmarks serve --port 4111
+uv run x-bookmarks watch
+uv run x-bookmarks launchd install
 ```
 
 ## Data model
@@ -79,6 +81,7 @@ All corpus data is intentionally local-only and ignored by git.
 - link extraction with metadata fallback and cached terminal failures
 - local delete/restore, notes, tags, ratings, and hidden state
 - stdio MCP server and local HTTP API
+- watch mode and macOS launch-at-login support via `launchd`
 - optional Claude-based categorization via the `ai` extra
 
 ## CLI docs

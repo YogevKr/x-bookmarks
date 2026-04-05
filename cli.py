@@ -25,6 +25,53 @@ from bookmark_query import (
 )
 
 
+def cmd_watch(args: argparse.Namespace) -> None:
+    from bookmark_watch import run_watch
+
+    result = run_watch(
+        interval=args.interval,
+        once=args.once,
+        quiet=args.quiet or args.json,
+        force=args.force,
+    )
+    if args.json and result is not None:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def cmd_launchd(args: argparse.Namespace) -> None:
+    from bookmark_launchd import (
+        install_launch_agent,
+        launch_agent_status,
+        uninstall_launch_agent,
+    )
+
+    if args.launchd_command == "install":
+        result = install_launch_agent(
+            interval=args.interval,
+            base_dir=args.base_dir,
+            quiet=not args.verbose,
+        )
+    elif args.launchd_command == "uninstall":
+        result = uninstall_launch_agent()
+    else:
+        result = launch_agent_status()
+
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+
+    print(f"Label: {result['label']}")
+    print(f"Plist: {result['plist_path']}")
+    print(f"Installed: {result['installed']}")
+    print(f"Loaded: {result['loaded']}")
+    if result.get("pid") is not None:
+        print(f"PID: {result['pid']}")
+    if result.get("state") is not None:
+        print(f"State: {result['state']}")
+    if result.get("last_exit_code") is not None:
+        print(f"Last exit: {result['last_exit_code']}")
+
+
 def cmd_extract(args: argparse.Namespace) -> None:
     print("Phase 1: Content extraction")
     from extract import run_extraction
@@ -489,6 +536,25 @@ def build_parser() -> argparse.ArgumentParser:
     refresh_parser.add_argument("--force", action="store_true", help="Force a full rebuild")
     refresh_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
+    watch_parser = sub.add_parser("watch", help="Continuously keep the local index fresh")
+    watch_parser.add_argument("--interval", type=float, default=5.0, help="Poll interval in seconds")
+    watch_parser.add_argument("--once", action="store_true", help="Run one watch iteration and exit")
+    watch_parser.add_argument("--force", action="store_true", help="Force a rebuild on every iteration")
+    watch_parser.add_argument("--quiet", action="store_true", help="Suppress periodic status lines")
+    watch_parser.add_argument("--json", action="store_true", help="Emit JSON for --once")
+
+    launchd_parser = sub.add_parser("launchd", help="Manage a macOS launch agent for watch mode")
+    launchd_sub = launchd_parser.add_subparsers(dest="launchd_command", required=True)
+    launchd_install = launchd_sub.add_parser("install", help="Install and start the watch LaunchAgent")
+    launchd_install.add_argument("--interval", type=float, default=5.0, help="Watch poll interval in seconds")
+    launchd_install.add_argument("--base-dir", type=Path, help="Bookmark workspace to watch (defaults to current runtime base)")
+    launchd_install.add_argument("--verbose", action="store_true", help="Write watch logs to stdout/stderr instead of quiet mode")
+    launchd_install.add_argument("--json", action="store_true", help="Emit JSON")
+    launchd_status = launchd_sub.add_parser("status", help="Show LaunchAgent status")
+    launchd_status.add_argument("--json", action="store_true", help="Emit JSON")
+    launchd_uninstall = launchd_sub.add_parser("uninstall", help="Unload and remove the LaunchAgent")
+    launchd_uninstall.add_argument("--json", action="store_true", help="Emit JSON")
+
     doctor_parser = sub.add_parser("doctor", help="Check source files, index state, and sync-state health")
     doctor_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
@@ -585,6 +651,8 @@ def main(argv: list[str] | None = None) -> None:
         "unhide": cmd_unhide,
         "status": cmd_status,
         "refresh": cmd_refresh,
+        "watch": cmd_watch,
+        "launchd": cmd_launchd,
         "doctor": cmd_doctor,
         "search": cmd_search,
         "list": cmd_list,

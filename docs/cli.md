@@ -52,7 +52,27 @@ uv run x-bookmarks status
 uv run x-bookmarks doctor
 uv run x-bookmarks refresh
 uv run x-bookmarks refresh --force
+uv run x-bookmarks watch
+uv run x-bookmarks watch --once --json
 ```
+
+Notes:
+- `watch` polls local source files and refreshes the SQLite index whenever they drift.
+- `watch` does not require a background database service; it is just a long-running CLI loop.
+
+## macOS launch agent
+
+```bash
+uv run x-bookmarks launchd install
+uv run x-bookmarks launchd install --base-dir /path/to/bookmark-workspace
+uv run x-bookmarks launchd status
+uv run x-bookmarks launchd uninstall
+```
+
+Notes:
+- `launchd install` creates a LaunchAgent that starts `x-bookmarks watch` at login.
+- The watched workspace is pinned via `X_BOOKMARKS_HOME`, so it does not depend on the shell working directory.
+- Logs go to `.x-bookmarks/watch.stdout.log` and `.x-bookmarks/watch.stderr.log` inside the watched workspace.
 
 ## Query commands
 

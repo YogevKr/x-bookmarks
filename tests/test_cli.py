@@ -31,8 +31,22 @@ class CliSurfaceTest(unittest.TestCase):
         parser = build_parser()
         search_args = parser.parse_args(["search", "observability", "--explain"])
         doctor_args = parser.parse_args(["doctor", "--json"])
+        watch_args = parser.parse_args(["watch", "--once", "--json"])
         self.assertTrue(search_args.explain)
         self.assertTrue(doctor_args.json)
+        self.assertTrue(watch_args.once)
+        self.assertTrue(watch_args.json)
+
+    def test_launchd_parse(self) -> None:
+        parser = build_parser()
+        install_args = parser.parse_args(["launchd", "install", "--interval", "10", "--base-dir", "/tmp/bookmarks", "--json"])
+        status_args = parser.parse_args(["launchd", "status", "--json"])
+        uninstall_args = parser.parse_args(["launchd", "uninstall"])
+        self.assertEqual(install_args.interval, 10)
+        self.assertEqual(str(install_args.base_dir), "/tmp/bookmarks")
+        self.assertTrue(install_args.json)
+        self.assertEqual(status_args.launchd_command, "status")
+        self.assertEqual(uninstall_args.launchd_command, "uninstall")
 
     def test_local_metadata_commands_parse(self) -> None:
         parser = build_parser()
