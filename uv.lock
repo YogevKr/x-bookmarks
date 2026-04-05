@@ -236,9 +236,12 @@ wheels = [
 name = "x-bookmarks"
 version = "0.1.0"
 source = { editable = "." }
-dependencies = [
+
+[package.optional-dependencies]
+ai = [
     { name = "anthropic" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "anthropic", specifier = ">=0.86.0" }]
+requires-dist = [{ name = "anthropic", marker = "extra == 'ai'", specifier = ">=0.86.0" }]
+provides-extras = ["ai"]
