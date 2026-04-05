@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -249,6 +250,14 @@ class BookmarkIndexTest(unittest.TestCase):
         status = get_index_status(paths=self.paths)
         self.assertTrue(status["stale"])
         self.assertIn("source_files_changed", status["reasons"])
+
+    def test_mtime_only_change_does_not_mark_index_stale(self) -> None:
+        refresh_index(paths=self.paths)
+        bookmarks_file = self.base / "bookmarks.json"
+        stat = bookmarks_file.stat()
+        os.utime(bookmarks_file, ns=(stat.st_atime_ns + 1_000_000_000, stat.st_mtime_ns + 1_000_000_000))
+        status = get_index_status(paths=self.paths)
+        self.assertTrue(status["fresh"])
 
     def test_deleted_list_and_show(self) -> None:
         sync_bookmarks(reconcile_only=True, paths=self.paths)

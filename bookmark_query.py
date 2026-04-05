@@ -129,6 +129,24 @@ def _file_snapshot(path: Path) -> dict:
     }
 
 
+def _snapshot_signature(snapshot: dict | None) -> dict:
+    data = snapshot or {}
+    return {
+        "exists": data.get("exists"),
+        "sha256": data.get("sha256"),
+        "bookmark_count": data.get("bookmark_count"),
+        "valid_json": data.get("valid_json"),
+    }
+
+
+def _source_state_signature(source_state: dict | None) -> dict:
+    files = (source_state or {}).get("files", {})
+    return {
+        name: _snapshot_signature(files.get(name))
+        for name in ("bookmarks", "enriched", "categorized")
+    }
+
+
 def parse_timestamp(timestamp: str | None) -> datetime | None:
     if not timestamp:
         return None
@@ -798,7 +816,7 @@ def get_index_status(*, paths: IndexPaths | None = None) -> dict:
             reasons.append("version_mismatch")
         if manifest.get("doc_count") != len(bookmarks):
             reasons.append("doc_count_mismatch")
-        if manifest.get("source_state", {}).get("files") != source_state.get("files"):
+        if _source_state_signature(manifest.get("source_state")) != _source_state_signature(source_state):
             reasons.append("source_files_changed")
         if manifest.get("source_state", {}).get("base") != source_state.get("base"):
             reasons.append("source_base_changed")
