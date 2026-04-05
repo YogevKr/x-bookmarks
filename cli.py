@@ -112,6 +112,71 @@ def cmd_restore(args: argparse.Namespace) -> None:
     print(f"Bookmarks: {result['bookmarks']['current']} active")
 
 
+def cmd_note(args: argparse.Namespace) -> None:
+    from bookmark_sync import set_note
+
+    text = " ".join(args.text).strip()
+    if not args.clear and not text:
+        raise SystemExit("note requires text or --clear")
+    result = set_note(args.id, text, clear=args.clear)
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    print(f"Note updated: {', '.join(result['mutation']['updated']) or 'none'}")
+
+
+def cmd_tag(args: argparse.Namespace) -> None:
+    from bookmark_sync import add_tags
+
+    result = add_tags(args.id, args.tags)
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    print(f"Tagged: {', '.join(result['mutation']['updated']) or 'none'}")
+
+
+def cmd_untag(args: argparse.Namespace) -> None:
+    from bookmark_sync import remove_tags
+
+    result = remove_tags(args.id, args.tags)
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    print(f"Tags removed: {', '.join(result['mutation']['updated']) or 'none'}")
+
+
+def cmd_rate(args: argparse.Namespace) -> None:
+    from bookmark_sync import set_rating
+
+    if not args.clear and args.value is None:
+        raise SystemExit("rate requires a value or --clear")
+    result = set_rating(args.id, args.value, clear=args.clear)
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    print(f"Rating updated: {', '.join(result['mutation']['updated']) or 'none'}")
+
+
+def cmd_hide(args: argparse.Namespace) -> None:
+    from bookmark_sync import hide_bookmarks
+
+    result = hide_bookmarks(args.ids)
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    print(f"Hidden: {', '.join(result['mutation']['updated']) or 'none'}")
+
+
+def cmd_unhide(args: argparse.Namespace) -> None:
+    from bookmark_sync import unhide_bookmarks
+
+    result = unhide_bookmarks(args.ids)
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    print(f"Unhidden: {', '.join(result['mutation']['updated']) or 'none'}")
+
+
 def _auto_refresh(args: argparse.Namespace) -> bool:
     return not getattr(args, "no_refresh", False)
 
@@ -232,6 +297,7 @@ def cmd_search(args: argparse.Namespace) -> None:
         before=args.before,
         limit=args.limit,
         group_by=args.group_by,
+        hidden=args.hidden,
         explain=args.explain,
         auto_refresh=_auto_refresh(args),
     )
@@ -255,6 +321,7 @@ def cmd_list(args: argparse.Namespace) -> None:
         offset=args.offset,
         sort=args.sort,
         deleted=args.deleted,
+        hidden=args.hidden,
         auto_refresh=_auto_refresh(args),
     )
     if args.json:
@@ -383,6 +450,36 @@ def build_parser() -> argparse.ArgumentParser:
     restore_parser.add_argument("--all", action="store_true", help="Restore all tombstoned bookmarks")
     restore_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
+    note_parser = sub.add_parser("note", help="Set or clear a local note on a bookmark")
+    note_parser.add_argument("id", help="Bookmark id")
+    note_parser.add_argument("text", nargs="*", help="Note text")
+    note_parser.add_argument("--clear", action="store_true", help="Remove the local note")
+    note_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    tag_parser = sub.add_parser("tag", help="Add local tags to a bookmark")
+    tag_parser.add_argument("id", help="Bookmark id")
+    tag_parser.add_argument("tags", nargs="+", help="Tags to add")
+    tag_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    untag_parser = sub.add_parser("untag", help="Remove local tags from a bookmark")
+    untag_parser.add_argument("id", help="Bookmark id")
+    untag_parser.add_argument("tags", nargs="+", help="Tags to remove")
+    untag_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    rate_parser = sub.add_parser("rate", help="Set or clear a local 1-5 rating on a bookmark")
+    rate_parser.add_argument("id", help="Bookmark id")
+    rate_parser.add_argument("value", nargs="?", type=int, help="Rating value 1-5")
+    rate_parser.add_argument("--clear", action="store_true", help="Remove the local rating")
+    rate_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    hide_parser = sub.add_parser("hide", help="Hide bookmarks from normal search/list/stats")
+    hide_parser.add_argument("ids", nargs="+", help="Bookmark ids")
+    hide_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    unhide_parser = sub.add_parser("unhide", help="Unhide bookmarks")
+    unhide_parser.add_argument("ids", nargs="+", help="Bookmark ids")
+    unhide_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
     status_parser = sub.add_parser("status", help="Show index freshness and source drift")
     status_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
@@ -404,6 +501,7 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--before", help="Only include bookmarks on/before YYYY-MM-DD")
     search_parser.add_argument("--limit", type=int, default=20, help="Max results")
     search_parser.add_argument("--group-by", choices=["category", "author", "domain", "year"], help="Group results")
+    search_parser.add_argument("--hidden", action="store_true", help="Search only hidden bookmarks")
     search_parser.add_argument("--explain", action="store_true", help="Show why each result matched and ranked")
     search_parser.add_argument("--json", action="store_true", help="Emit JSON")
     search_parser.add_argument("--no-refresh", action="store_true", help="Do not auto-refresh a stale index")
@@ -421,6 +519,7 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser.add_argument("--limit", type=int, default=30, help="Max results")
     list_parser.add_argument("--offset", type=int, default=0, help="Offset into the result set")
     list_parser.add_argument("--deleted", action="store_true", help="List locally deleted bookmarks from sync archive")
+    list_parser.add_argument("--hidden", action="store_true", help="List hidden bookmarks instead of active visible ones")
     list_parser.add_argument("--json", action="store_true", help="Emit JSON")
     list_parser.add_argument("--no-refresh", action="store_true", help="Do not auto-refresh a stale index")
 
@@ -476,6 +575,12 @@ def main(argv: list[str] | None = None) -> None:
         "sync": cmd_sync,
         "remove": cmd_remove,
         "restore": cmd_restore,
+        "note": cmd_note,
+        "tag": cmd_tag,
+        "untag": cmd_untag,
+        "rate": cmd_rate,
+        "hide": cmd_hide,
+        "unhide": cmd_unhide,
         "status": cmd_status,
         "refresh": cmd_refresh,
         "doctor": cmd_doctor,

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from bookmark_query import IndexPaths, get_index_status, list_bookmarks
-from bookmark_sync import remove_bookmarks, restore_bookmarks, sync_bookmarks
+from bookmark_sync import add_tags, hide_bookmarks, remove_bookmarks, restore_bookmarks, set_note, set_rating, sync_bookmarks
 
 
 BASE_PAYLOAD = {
@@ -177,6 +177,24 @@ class BookmarkSyncTest(unittest.TestCase):
         self.assertEqual(result["mutation"]["restored"], ["1", "2"])
         ids = {bookmark["id"] for bookmark in self._read_json("bookmarks.json")["bookmarks"]}
         self.assertEqual(ids, {"1", "2", "3"})
+
+    def test_local_metadata_persists_through_sync(self) -> None:
+        sync_bookmarks(reconcile_only=True, paths=self.paths)
+        set_note("1", "worth revisiting", paths=self.paths)
+        add_tags("1", ["favorite", "otel"], paths=self.paths)
+        set_rating("1", 5, paths=self.paths)
+        hide_bookmarks(["1"], paths=self.paths)
+
+        import_file = self.base / "same-bookmarks.json"
+        import_file.write_text(json.dumps(BASE_PAYLOAD, ensure_ascii=False), encoding="utf-8")
+        sync_bookmarks(input_file=import_file, paths=self.paths)
+
+        for name in ("bookmarks.json", "enriched.json", "categorized.json"):
+            bookmark = next(item for item in self._read_json(name)["bookmarks"] if item["id"] == "1")
+            self.assertEqual(bookmark["local"]["note"], "worth revisiting")
+            self.assertEqual(set(bookmark["local"]["tags"]), {"favorite", "otel"})
+            self.assertEqual(bookmark["local"]["rating"], 5)
+            self.assertTrue(bookmark["local"]["hidden"])
 
 
 if __name__ == "__main__":

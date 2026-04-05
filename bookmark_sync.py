@@ -6,6 +6,7 @@ import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Callable
 
 from bookmark_query import IndexPaths, default_paths, parse_timestamp, refresh_index
 from text_repair import repair_value
@@ -36,6 +37,40 @@ def _now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
+def _normalize_local_metadata(local: dict | None) -> dict:
+    if not isinstance(local, dict):
+        return {}
+
+    note = str(local.get("note", "")).strip()
+    raw_tags = local.get("tags", [])
+    if isinstance(raw_tags, str):
+        raw_tags = [raw_tags]
+    tags: list[str] = []
+    seen: set[str] = set()
+    for tag in raw_tags if isinstance(raw_tags, list) else []:
+        value = str(tag).strip().lstrip("#").casefold()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        tags.append(value)
+
+    rating = local.get("rating")
+    normalized: dict = {}
+    if note:
+        normalized["note"] = note
+    if tags:
+        normalized["tags"] = tags
+    if isinstance(rating, int) and 1 <= rating <= 5:
+        normalized["rating"] = rating
+    if bool(local.get("hidden")):
+        normalized["hidden"] = True
+    if local.get("hidden_at") and normalized.get("hidden"):
+        normalized["hidden_at"] = str(local["hidden_at"])
+    if normalized:
+        normalized["updated_at"] = str(local.get("updated_at") or _now_iso())
+    return normalized
+
+
 def _normalize_bookmark(bookmark: dict) -> dict:
     handle = str(bookmark.get("handle", "")).strip()
     if handle and not handle.startswith("@"):
@@ -56,6 +91,9 @@ def _normalize_bookmark(bookmark: dict) -> dict:
         normalized["extracted"] = repair_value(bookmark["extracted"])
     if bookmark.get("ai"):
         normalized["ai"] = repair_value(bookmark["ai"])
+    local = _normalize_local_metadata(repair_value(bookmark.get("local")))
+    if local:
+        normalized["local"] = local
     return normalized
 
 
@@ -171,10 +209,14 @@ def _record_tombstone(state: dict, bookmark_id: str, *, source: str, bookmark: d
 
 
 def _base_record(bookmark: dict) -> dict:
-    return {
+    record = {
         key: repair_value(bookmark.get(key))
         for key in ("id", "author", "handle", "timestamp", "text", "media", "hashtags", "urls")
     }
+    local = _normalize_local_metadata(repair_value(bookmark.get("local")))
+    if local:
+        record["local"] = local
+    return record
 
 
 def _enriched_record(bookmark: dict) -> dict:
@@ -219,6 +261,12 @@ def _merge_record(
             merged["extracted"] = repair_value(candidate["extracted"])
         if candidate.get("ai"):
             merged["ai"] = repair_value(candidate["ai"])
+        if candidate.get("local") is not None:
+            local = _normalize_local_metadata(repair_value(candidate.get("local")))
+            if local:
+                merged["local"] = local
+            else:
+                merged.pop("local", None)
     return merged
 
 
@@ -234,6 +282,88 @@ def _render_payload(reference: dict, bookmarks: list[dict], *, kind: str) -> dic
         "bookmarks": [render(bookmark) for bookmark in bookmarks],
     }
     return output
+
+
+def _load_active_bookmarks(paths: IndexPaths, state: dict) -> tuple[dict, list[dict]]:
+    base_payload = _read_json(paths.bookmarks_file, strict=False)
+    enriched_payload = _read_json(paths.enriched_file, strict=False)
+    categorized_payload = _read_json(paths.categorized_file, strict=False)
+    base_map = _payload_map(base_payload)
+    enriched_map = _payload_map(enriched_payload)
+    categorized_map = _payload_map(categorized_payload)
+    archive_map = {
+        str(bookmark_id): _normalize_bookmark(bookmark)
+        for bookmark_id, bookmark in state.get("archive", {}).items()
+    }
+    active_ids = (set(base_map) | set(enriched_map) | set(categorized_map)) - set(state.get("tombstones", {}))
+    merged_bookmarks = [
+        merged
+        for bookmark_id in active_ids
+        if (
+            merged := _merge_record(
+                bookmark_id,
+                base_map=base_map,
+                enriched_map=enriched_map,
+                categorized_map=categorized_map,
+                archive_map=archive_map,
+            )
+        )
+    ]
+    return (base_payload or enriched_payload or categorized_payload or _empty_payload(), _sort_bookmarks(merged_bookmarks))
+
+
+def _persist_bookmarks(
+    *,
+    reference_payload: dict,
+    bookmarks: list[dict],
+    state: dict,
+    paths: IndexPaths,
+    run_extract: bool = False,
+    run_categorize: bool = False,
+    use_regex: bool = False,
+) -> dict:
+    output_base = _render_payload(reference_payload, bookmarks, kind="bookmarks")
+    output_enriched = _render_payload(reference_payload, bookmarks, kind="enriched")
+    output_categorized = _render_payload(reference_payload, bookmarks, kind="categorized")
+
+    _write_json(paths.bookmarks_file, output_base)
+    should_write_enriched = paths.enriched_file.exists() or any(
+        bookmark.get("linked_pages") or bookmark.get("extracted") or bookmark.get("local")
+        for bookmark in bookmarks
+    )
+    should_write_categorized = paths.categorized_file.exists() or any(
+        bookmark.get("ai") or bookmark.get("local")
+        for bookmark in bookmarks
+    )
+    if should_write_enriched:
+        _write_json(paths.enriched_file, output_enriched)
+    if should_write_categorized:
+        _write_json(paths.categorized_file, output_categorized)
+
+    if run_extract:
+        from extract import run_extraction
+
+        run_extraction()
+    if run_categorize:
+        from categorize import run_categorization
+
+        run_categorization(force=False, use_regex=use_regex)
+
+    index_state = refresh_index(paths=paths)
+    state["snapshots"] = {
+        "bookmarks": _state_path_snapshot(paths.bookmarks_file, output_base),
+        "enriched": _state_path_snapshot(paths.enriched_file, output_enriched if should_write_enriched else None),
+        "categorized": _state_path_snapshot(paths.categorized_file, output_categorized if should_write_categorized else None),
+    }
+    _save_sync_state(paths, state)
+    return {
+        "base": output_base,
+        "enriched": output_enriched if should_write_enriched else None,
+        "categorized": output_categorized if should_write_categorized else None,
+        "has_enriched": should_write_enriched,
+        "has_categorized": should_write_categorized,
+        "index": index_state,
+    }
 
 
 def sync_bookmarks(
@@ -324,46 +454,18 @@ def sync_bookmarks(
     merged_bookmarks = _sort_bookmarks(merged_bookmarks)
 
     reference_payload = base_payload if base_payload["bookmarks"] else base_before or _empty_payload()
-    output_base = _render_payload(reference_payload, merged_bookmarks, kind="bookmarks")
-    output_enriched = _render_payload(reference_payload, merged_bookmarks, kind="enriched")
-    output_categorized = _render_payload(reference_payload, merged_bookmarks, kind="categorized")
-
-    _write_json(current_paths.bookmarks_file, output_base)
-
-    should_write_enriched = current_paths.enriched_file.exists() or any(
-        bookmark.get("linked_pages") or bookmark.get("extracted") for bookmark in merged_bookmarks
+    persisted = _persist_bookmarks(
+        reference_payload=reference_payload,
+        bookmarks=merged_bookmarks,
+        state=state,
+        paths=current_paths,
+        run_extract=run_extract,
+        run_categorize=run_categorize,
+        use_regex=use_regex,
     )
-    should_write_categorized = current_paths.categorized_file.exists() or any(
-        bookmark.get("ai") for bookmark in merged_bookmarks
-    )
-    if should_write_enriched:
-        _write_json(current_paths.enriched_file, output_enriched)
-    if should_write_categorized:
-        _write_json(current_paths.categorized_file, output_categorized)
-
-    if run_extract:
-        from extract import run_extraction
-
-        run_extraction()
-    if run_categorize:
-        from categorize import run_categorization
-
-        run_categorization(force=False, use_regex=use_regex)
-
-    index_state = refresh_index(paths=current_paths)
-    output_snapshots = {
-        "bookmarks": _state_path_snapshot(current_paths.bookmarks_file, output_base),
-        "enriched": _state_path_snapshot(current_paths.enriched_file, output_enriched if should_write_enriched else None),
-        "categorized": _state_path_snapshot(
-            current_paths.categorized_file,
-            output_categorized if should_write_categorized else None,
-        ),
-    }
-    state["snapshots"] = output_snapshots
-    _save_sync_state(current_paths, state)
 
     tombstones = state.get("tombstones", {})
-    current_ids = {bookmark["id"] for bookmark in output_base["bookmarks"]}
+    current_ids = {bookmark["id"] for bookmark in persisted["base"]["bookmarks"]}
     added = len(current_ids - previous_ids)
     removed = len(previous_ids - current_ids)
     return {
@@ -379,12 +481,12 @@ def sync_bookmarks(
         },
         "derived": {
             "enriched": {
-                "current": len(output_enriched["bookmarks"]) if should_write_enriched else 0,
-                "has_file": should_write_enriched,
+                "current": len((persisted["enriched"] or {}).get("bookmarks", [])),
+                "has_file": persisted["has_enriched"],
             },
             "categorized": {
-                "current": len(output_categorized["bookmarks"]) if should_write_categorized else 0,
-                "has_file": should_write_categorized,
+                "current": len((persisted["categorized"] or {}).get("bookmarks", [])),
+                "has_file": persisted["has_categorized"],
             },
         },
         "bidirectional": {
@@ -392,7 +494,7 @@ def sync_bookmarks(
             "delete_sources": {key: len(value) for key, value in deletion_sources.items()},
             "restored": len(restore_ids),
         },
-        "index": index_state,
+        "index": persisted["index"],
     }
 
 
@@ -440,6 +542,152 @@ def remove_bookmarks(
     )
     result["mutation"] = {"removed": removed, "missing": missing}
     return result
+
+
+def _metadata_result(*, paths: IndexPaths, state: dict, persisted: dict, mutation: dict) -> dict:
+    return {
+        "source_of_truth": str(paths.bookmarks_file),
+        "bookmarks": {
+            "current": len(persisted["base"]["bookmarks"]),
+            "tombstoned": len(state.get("tombstones", {})),
+        },
+        "derived": {
+            "enriched": {
+                "current": len((persisted["enriched"] or {}).get("bookmarks", [])),
+                "has_file": persisted["has_enriched"],
+            },
+            "categorized": {
+                "current": len((persisted["categorized"] or {}).get("bookmarks", [])),
+                "has_file": persisted["has_categorized"],
+            },
+        },
+        "index": persisted["index"],
+        "mutation": mutation,
+    }
+
+
+def _mutate_local_bookmarks(
+    bookmark_ids: list[str],
+    *,
+    paths: IndexPaths | None = None,
+    mutation_name: str,
+    mutate: Callable[[dict, dict], bool],
+) -> dict:
+    current_paths = paths or default_paths()
+    state = _load_sync_state(current_paths)
+    reference_payload, bookmarks = _load_active_bookmarks(current_paths, state)
+    bookmark_map = {bookmark["id"]: bookmark for bookmark in bookmarks}
+    updated: list[str] = []
+    missing: list[str] = []
+
+    for bookmark_id in [str(value) for value in bookmark_ids]:
+        bookmark = bookmark_map.get(bookmark_id)
+        if not bookmark:
+            missing.append(bookmark_id)
+            continue
+        local = _normalize_local_metadata(repair_value(bookmark.get("local")))
+        changed = mutate(local, bookmark)
+        normalized_local = _normalize_local_metadata(local)
+        if normalized_local:
+            bookmark["local"] = normalized_local
+        else:
+            bookmark.pop("local", None)
+        if changed:
+            updated.append(bookmark_id)
+
+    bookmarks = _sort_bookmarks(list(bookmark_map.values()))
+    persisted = _persist_bookmarks(reference_payload=reference_payload, bookmarks=bookmarks, state=state, paths=current_paths)
+    return _metadata_result(
+        paths=current_paths,
+        state=state,
+        persisted=persisted,
+        mutation={"type": mutation_name, "updated": updated, "missing": missing},
+    )
+
+
+def set_note(bookmark_id: str, note: str, *, clear: bool = False, paths: IndexPaths | None = None) -> dict:
+    clean_note = str(note).strip()
+
+    def mutate(local: dict, _bookmark: dict) -> bool:
+        before = local.get("note")
+        if clear or not clean_note:
+            local.pop("note", None)
+        else:
+            local["note"] = clean_note
+        local["updated_at"] = _now_iso()
+        return before != local.get("note")
+
+    return _mutate_local_bookmarks([bookmark_id], paths=paths, mutation_name="note", mutate=mutate)
+
+
+def add_tags(bookmark_id: str, tags: list[str], *, paths: IndexPaths | None = None) -> dict:
+    normalized_tags = _normalize_local_metadata({"tags": tags}).get("tags", [])
+
+    def mutate(local: dict, _bookmark: dict) -> bool:
+        before = list(local.get("tags", []))
+        merged = before + [tag for tag in normalized_tags if tag not in before]
+        if merged:
+            local["tags"] = merged
+        else:
+            local.pop("tags", None)
+        local["updated_at"] = _now_iso()
+        return before != local.get("tags", [])
+
+    return _mutate_local_bookmarks([bookmark_id], paths=paths, mutation_name="tag", mutate=mutate)
+
+
+def remove_tags(bookmark_id: str, tags: list[str], *, paths: IndexPaths | None = None) -> dict:
+    normalized_tags = set(_normalize_local_metadata({"tags": tags}).get("tags", []))
+
+    def mutate(local: dict, _bookmark: dict) -> bool:
+        before = list(local.get("tags", []))
+        remaining = [tag for tag in before if tag not in normalized_tags]
+        if remaining:
+            local["tags"] = remaining
+        else:
+            local.pop("tags", None)
+        local["updated_at"] = _now_iso()
+        return before != remaining
+
+    return _mutate_local_bookmarks([bookmark_id], paths=paths, mutation_name="untag", mutate=mutate)
+
+
+def set_rating(bookmark_id: str, rating: int | None, *, clear: bool = False, paths: IndexPaths | None = None) -> dict:
+    if rating is not None and not 1 <= rating <= 5:
+        raise ValueError("rating must be between 1 and 5")
+
+    def mutate(local: dict, _bookmark: dict) -> bool:
+        before = local.get("rating")
+        if clear or rating is None:
+            local.pop("rating", None)
+        else:
+            local["rating"] = rating
+        local["updated_at"] = _now_iso()
+        return before != local.get("rating")
+
+    return _mutate_local_bookmarks([bookmark_id], paths=paths, mutation_name="rate", mutate=mutate)
+
+
+def hide_bookmarks(bookmark_ids: list[str], *, paths: IndexPaths | None = None) -> dict:
+    def mutate(local: dict, _bookmark: dict) -> bool:
+        before = bool(local.get("hidden"))
+        local["hidden"] = True
+        local["hidden_at"] = _now_iso()
+        local["updated_at"] = _now_iso()
+        return not before
+
+    return _mutate_local_bookmarks(bookmark_ids, paths=paths, mutation_name="hide", mutate=mutate)
+
+
+def unhide_bookmarks(bookmark_ids: list[str], *, paths: IndexPaths | None = None) -> dict:
+    def mutate(local: dict, _bookmark: dict) -> bool:
+        before = bool(local.get("hidden"))
+        local.pop("hidden", None)
+        local.pop("hidden_at", None)
+        local["updated_at"] = _now_iso()
+        return before
+
+    return _mutate_local_bookmarks(bookmark_ids, paths=paths, mutation_name="unhide", mutate=mutate)
 
 
 def restore_bookmarks(

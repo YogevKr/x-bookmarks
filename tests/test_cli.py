@@ -28,6 +28,17 @@ class CliSurfaceTest(unittest.TestCase):
         self.assertTrue(search_args.explain)
         self.assertTrue(doctor_args.json)
 
+    def test_local_metadata_commands_parse(self) -> None:
+        parser = build_parser()
+        note_args = parser.parse_args(["note", "123", "keep", "this"])
+        tag_args = parser.parse_args(["tag", "123", "favorite", "otel"])
+        rate_args = parser.parse_args(["rate", "123", "5"])
+        hide_args = parser.parse_args(["hide", "123", "456"])
+        self.assertEqual(note_args.text, ["keep", "this"])
+        self.assertEqual(tag_args.tags, ["favorite", "otel"])
+        self.assertEqual(rate_args.value, 5)
+        self.assertEqual(hide_args.ids, ["123", "456"])
+
     def test_remove_and_restore_parse_ids(self) -> None:
         parser = build_parser()
         remove_args = parser.parse_args(["remove", "123", "456", "--json"])
@@ -42,8 +53,10 @@ class CliSurfaceTest(unittest.TestCase):
         parser = build_parser()
         show_args = parser.parse_args(["show", "123", "--deleted"])
         list_args = parser.parse_args(["list", "--deleted"])
+        hidden_args = parser.parse_args(["list", "--hidden"])
         self.assertTrue(show_args.deleted)
         self.assertTrue(list_args.deleted)
+        self.assertTrue(hidden_args.hidden)
 
     def test_show_and_context_parse_fetch_link(self) -> None:
         parser = build_parser()

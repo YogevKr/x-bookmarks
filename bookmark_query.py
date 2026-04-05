@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 from bookmark_paths import resolve_base_dir
 from text_repair import repair_value
 
-INDEX_VERSION = 3
+INDEX_VERSION = 4
 VECTOR_DIM = 256
 RRF_K = 60
 SKIP_DOMAINS = {"x.com", "twitter.com", "t.co"}
@@ -252,6 +252,29 @@ def bookmark_link_site(bookmark: dict) -> str:
     return str(page.get("site_name", "")).strip()
 
 
+def bookmark_local(bookmark: dict) -> dict:
+    local = bookmark.get("local", {})
+    return local if isinstance(local, dict) else {}
+
+
+def bookmark_local_note(bookmark: dict) -> str:
+    return str(bookmark_local(bookmark).get("note", "")).strip()
+
+
+def bookmark_local_tags(bookmark: dict) -> list[str]:
+    tags = bookmark_local(bookmark).get("tags", [])
+    return [str(tag).strip() for tag in tags if str(tag).strip()]
+
+
+def bookmark_local_rating(bookmark: dict) -> int | None:
+    rating = bookmark_local(bookmark).get("rating")
+    return rating if isinstance(rating, int) else None
+
+
+def bookmark_hidden(bookmark: dict) -> bool:
+    return bool(bookmark_local(bookmark).get("hidden"))
+
+
 def _parsed_from_bookmark(bookmark: dict, *, deleted: bool = False, deleted_info: dict | None = None) -> dict:
     dt = bookmark_date(bookmark)
     categories = bookmark_categories(bookmark)
@@ -358,6 +381,8 @@ def _merge_bookmark_corpus(paths: IndexPaths | None = None) -> tuple[dict, list[
                 existing["linked_pages"] = bookmark["linked_pages"]
             if bookmark.get("extracted"):
                 existing["extracted"] = bookmark["extracted"]
+            if bookmark.get("local"):
+                existing["local"] = bookmark["local"]
 
     categorized = sources["categorized"]
     if categorized:
@@ -371,6 +396,8 @@ def _merge_bookmark_corpus(paths: IndexPaths | None = None) -> tuple[dict, list[
                 existing["extracted"] = bookmark["extracted"]
             if bookmark.get("ai"):
                 existing["ai"] = bookmark["ai"]
+            if bookmark.get("local"):
+                existing["local"] = bookmark["local"]
 
     bookmarks = list(base_rows.values())
     bookmarks.sort(key=lambda bookmark: bookmark_date(bookmark) or datetime.min.replace(tzinfo=UTC), reverse=True)
@@ -424,6 +451,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             domains_json TEXT,
             domains_flat TEXT,
             hashtags_json TEXT,
+            local_json TEXT,
+            local_note TEXT,
+            local_tags_json TEXT,
+            local_tags_flat TEXT,
+            hidden INTEGER,
+            rating INTEGER,
             linked_pages_json TEXT,
             extracted_title TEXT,
             extracted_description TEXT,
@@ -444,12 +477,25 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE bookmarks ADD COLUMN linked_pages_json TEXT")
     except sqlite3.OperationalError:
         pass
-    conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(id UNINDEXED, text, summary, categories, entities, extracted_title, extracted_description, extracted_content, author, handle, domains, hashtags, tokenize='unicode61')")
+    for column, ddl in [
+        ("local_json", "TEXT"),
+        ("local_note", "TEXT"),
+        ("local_tags_json", "TEXT"),
+        ("local_tags_flat", "TEXT"),
+        ("hidden", "INTEGER"),
+        ("rating", "INTEGER"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE bookmarks ADD COLUMN {column} {ddl}")
+        except sqlite3.OperationalError:
+            pass
+    conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(id UNINDEXED, text, summary, categories, entities, extracted_title, extracted_description, extracted_content, author, handle, domains, hashtags, local_note, local_tags, tokenize='unicode61')")
 
 
 def _combined_search_text(bookmark: dict) -> str:
     link_pages = bookmark_link_pages(bookmark)
     ai = bookmark.get("ai", {})
+    local_tags = bookmark_local_tags(bookmark)
     extracted_text = "\n".join(
         piece
         for page in link_pages
@@ -473,6 +519,8 @@ def _combined_search_text(bookmark: dict) -> str:
         str(bookmark.get("handle", "")),
         " ".join(iter_external_domains(bookmark)),
         " ".join(bookmark.get("hashtags", [])),
+        bookmark_local_note(bookmark),
+        " ".join(local_tags),
     ]
     return "\n".join(piece for piece in pieces if piece)
 
@@ -503,6 +551,8 @@ def _normalize_vector(values: list[float]) -> list[float]:
 def _bookmark_vector(bookmark: dict) -> list[float]:
     link_pages = bookmark_link_pages(bookmark)
     ai = bookmark.get("ai", {})
+    local_note = bookmark_local_note(bookmark)
+    local_tags = " ".join(bookmark_local_tags(bookmark))
     link_titles = " ".join(str(page.get("title", "")) for page in link_pages if page.get("title"))
     link_descriptions = " ".join(str(page.get("description", "")) for page in link_pages if page.get("description"))
     link_content = "\n".join(str(page.get("content", ""))[:1000] for page in link_pages if page.get("content"))
@@ -521,6 +571,8 @@ def _bookmark_vector(bookmark: dict) -> list[float]:
         (str(bookmark.get("author", "")), 1.0, False),
         (str(bookmark.get("handle", "")), 1.0, False),
         (" ".join(bookmark.get("hashtags", [])), 1.0, False),
+        (local_note, 2.0, True),
+        (local_tags, 1.5, False),
     ]
     for text, weight, chargrams in parts:
         if text:
@@ -554,6 +606,8 @@ def _row_from_bookmark(bookmark: dict) -> dict:
     entities = bookmark_entities(bookmark)
     domains = iter_external_domains(bookmark)
     hashtags = list(bookmark.get("hashtags", []))
+    local = bookmark_local(bookmark)
+    local_tags = bookmark_local_tags(bookmark)
     vector = _pack_vector(_bookmark_vector(bookmark))
     aggregated_titles = "\n".join(str(page.get("title", "")) for page in link_pages if page.get("title"))
     aggregated_descriptions = "\n".join(str(page.get("description", "")) for page in link_pages if page.get("description"))
@@ -579,6 +633,12 @@ def _row_from_bookmark(bookmark: dict) -> dict:
         "domains_json": json.dumps(domains, ensure_ascii=False),
         "domains_flat": " | ".join(domains),
         "hashtags_json": json.dumps(hashtags, ensure_ascii=False),
+        "local_json": json.dumps(local, ensure_ascii=False) if local else None,
+        "local_note": bookmark_local_note(bookmark),
+        "local_tags_json": json.dumps(local_tags, ensure_ascii=False),
+        "local_tags_flat": " | ".join(local_tags),
+        "hidden": 1 if bookmark_hidden(bookmark) else 0,
+        "rating": bookmark_local_rating(bookmark),
         "linked_pages_json": json.dumps(link_pages, ensure_ascii=False),
         "hashtags_text": " ".join(hashtags),
         "extracted_title": aggregated_titles or str(primary_link.get("title", "")),
@@ -607,14 +667,16 @@ def refresh_index(*, paths: IndexPaths | None = None, force: bool = False) -> di
     source_state, bookmarks = _merge_bookmark_corpus(current_paths)
     conn = _connect(current_paths)
     try:
+        manifest = _load_manifest(current_paths)
+        rebuild_schema = force or bool(manifest and manifest.get("version") != INDEX_VERSION)
+        if rebuild_schema:
+            with conn:
+                conn.execute("DROP TABLE IF EXISTS bookmarks_fts")
+                conn.execute("DROP TABLE IF EXISTS bookmarks")
         _ensure_schema(conn)
         with conn:
-            if force:
-                conn.execute("DELETE FROM bookmarks")
-                conn.execute("DELETE FROM bookmarks_fts")
-            else:
-                conn.execute("DELETE FROM bookmarks")
-                conn.execute("DELETE FROM bookmarks_fts")
+            conn.execute("DELETE FROM bookmarks")
+            conn.execute("DELETE FROM bookmarks_fts")
 
             for bookmark in bookmarks:
                 row = _row_from_bookmark(bookmark)
@@ -624,9 +686,10 @@ def refresh_index(*, paths: IndexPaths | None = None, force: bool = False) -> di
                         id, handle, author, timestamp, date, year, text, summary, language, type, importance,
                         media_count,
                         categories_json, categories_flat, entities_json, entities_flat, urls_json, domains_json,
-                        domains_flat, hashtags_json, linked_pages_json, extracted_title, extracted_description, extracted_content,
+                        domains_flat, hashtags_json, local_json, local_note, local_tags_json, local_tags_flat, hidden, rating,
+                        linked_pages_json, extracted_title, extracted_description, extracted_content,
                         search_text, vector
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["id"],
@@ -649,6 +712,12 @@ def refresh_index(*, paths: IndexPaths | None = None, force: bool = False) -> di
                         row["domains_json"],
                         row["domains_flat"],
                         row["hashtags_json"],
+                        row["local_json"],
+                        row["local_note"],
+                        row["local_tags_json"],
+                        row["local_tags_flat"],
+                        row["hidden"],
+                        row["rating"],
                         row["linked_pages_json"],
                         row["extracted_title"],
                         row["extracted_description"],
@@ -661,8 +730,8 @@ def refresh_index(*, paths: IndexPaths | None = None, force: bool = False) -> di
                     """
                     INSERT INTO bookmarks_fts (
                         id, text, summary, categories, entities, extracted_title, extracted_description,
-                        extracted_content, author, handle, domains, hashtags
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        extracted_content, author, handle, domains, hashtags, local_note, local_tags
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["id"],
@@ -677,6 +746,8 @@ def refresh_index(*, paths: IndexPaths | None = None, force: bool = False) -> di
                         row["handle"],
                         row["domains_flat"],
                         row["hashtags_text"],
+                        row["local_note"],
+                        row["local_tags_flat"],
                     ),
                 )
 
@@ -885,6 +956,7 @@ def _parse_row(row: sqlite3.Row) -> dict:
     urls = json.loads(row["urls_json"] or "[]")
     domains = json.loads(row["domains_json"] or "[]")
     hashtags = json.loads(row["hashtags_json"] or "[]")
+    local = json.loads(row["local_json"] or "{}")
     linked_pages = json.loads(row["linked_pages_json"] or "[]")
     primary_link = linked_pages[0] if linked_pages else {
         "title": row["extracted_title"],
@@ -899,6 +971,7 @@ def _parse_row(row: sqlite3.Row) -> dict:
         "text": row["text"],
         "urls": urls,
         "hashtags": hashtags,
+        "local": local,
         "linked_pages": linked_pages,
         "extracted": primary_link,
         "ai": {
@@ -943,6 +1016,10 @@ def _fts_query(query: str) -> str:
 def _filters_sql(filters: dict) -> tuple[list[str], list[object]]:
     clauses: list[str] = []
     values: list[object] = []
+    if filters.get("hidden_only"):
+        clauses.append("coalesce(hidden, 0) = 1")
+    elif not filters.get("include_hidden"):
+        clauses.append("coalesce(hidden, 0) = 0")
     if filters.get("author"):
         clauses.append("lower(handle) = ?")
         values.append(normalize_handle(filters["author"]))
@@ -987,7 +1064,8 @@ def _vector_candidates(conn: sqlite3.Connection, query: str, filters: dict, limi
     where = "WHERE " + " AND ".join(clauses) if clauses else ""
     sql = f"""
         SELECT id, handle, author, timestamp, date, text, summary, language, type, importance,
-               categories_json, entities_json, urls_json, domains_json, hashtags_json, linked_pages_json,
+               categories_json, entities_json, urls_json, domains_json, hashtags_json,
+               local_json, local_note, local_tags_json, local_tags_flat, hidden, rating, linked_pages_json,
                extracted_title, extracted_description, extracted_content, search_text, vector
         FROM bookmarks
         {where}
@@ -1013,7 +1091,8 @@ def _fetch_rows_by_ids(conn: sqlite3.Connection, ids: list[str]) -> dict[str, di
     rows = conn.execute(
         f"""
         SELECT id, handle, author, timestamp, date, text, summary, language, type, importance,
-               categories_json, entities_json, urls_json, domains_json, hashtags_json, linked_pages_json,
+               categories_json, entities_json, urls_json, domains_json, hashtags_json,
+               local_json, local_note, local_tags_json, local_tags_flat, hidden, rating, linked_pages_json,
                extracted_title, extracted_description, extracted_content, search_text, vector
         FROM bookmarks
         WHERE id IN ({placeholders})
@@ -1144,6 +1223,10 @@ def _result_payload(
         "entities": result["entities"],
         "domains": result["domains"],
         "hashtags": list(bookmark.get("hashtags", [])),
+        "note": bookmark_local_note(bookmark),
+        "tags": bookmark_local_tags(bookmark),
+        "rating": bookmark_local_rating(bookmark),
+        "hidden": bookmark_hidden(bookmark),
         "external_urls": external_urls(bookmark),
         "link_pages": bookmark_link_pages(bookmark),
         "language": result["language"],
@@ -1269,6 +1352,7 @@ def search_bookmarks(
     before: str | None = None,
     limit: int = 20,
     group_by: str | None = None,
+    hidden: bool = False,
     explain: bool = False,
     auto_refresh: bool = True,
     paths: IndexPaths | None = None,
@@ -1285,6 +1369,7 @@ def search_bookmarks(
             "bookmark_type_value": bookmark_type_value,
             "after": after,
             "before": before,
+            "hidden_only": hidden,
         }
         candidate_limit = max(limit * 8, 100)
         bm25 = _bm25_candidates(conn, query, filters, candidate_limit)
@@ -1355,6 +1440,7 @@ def list_bookmarks(
     offset: int = 0,
     sort: str = "date",
     deleted: bool = False,
+    hidden: bool = False,
     auto_refresh: bool = True,
     paths: IndexPaths | None = None,
 ) -> list[dict]:
@@ -1386,14 +1472,15 @@ def list_bookmarks(
             author=author,
             category=category,
             domain=domain,
-            language=language,
-            bookmark_type_value=bookmark_type_value,
-            after=after,
-            before=before,
-            limit=limit + offset,
-            auto_refresh=False,
-            paths=current_paths,
-        )
+                language=language,
+                bookmark_type_value=bookmark_type_value,
+                after=after,
+                before=before,
+                limit=limit + offset,
+                hidden=hidden,
+                auto_refresh=False,
+                paths=current_paths,
+            )
         assert isinstance(results, list)
         if sort == "date":
             results.sort(key=lambda item: item["date"], reverse=True)
@@ -1409,13 +1496,15 @@ def list_bookmarks(
             "bookmark_type_value": bookmark_type_value,
             "after": after,
             "before": before,
+            "hidden_only": hidden,
         }
         clauses, values = _filters_sql(filters)
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         rows = conn.execute(
             f"""
             SELECT id, handle, author, timestamp, date, text, summary, language, type, importance,
-                   categories_json, entities_json, urls_json, domains_json, hashtags_json, linked_pages_json,
+                   categories_json, entities_json, urls_json, domains_json, hashtags_json,
+                   local_json, local_note, local_tags_json, local_tags_flat, hidden, rating, linked_pages_json,
                    extracted_title, extracted_description, extracted_content, search_text, vector
             FROM bookmarks
             {where}
@@ -1437,7 +1526,8 @@ def show_bookmark(bookmark_id: str, *, auto_refresh: bool = True, paths: IndexPa
         row = conn.execute(
             """
             SELECT id, handle, author, timestamp, date, text, summary, language, type, importance,
-                   categories_json, entities_json, urls_json, domains_json, hashtags_json, linked_pages_json,
+                   categories_json, entities_json, urls_json, domains_json, hashtags_json,
+                   local_json, local_note, local_tags_json, local_tags_flat, hidden, rating, linked_pages_json,
                    extracted_title, extracted_description, extracted_content, search_text, vector
             FROM bookmarks WHERE id = ?
             """,
@@ -1467,7 +1557,8 @@ def bookmark_context(bookmark_id: str, *, limit: int = 5, auto_refresh: bool = T
         row = conn.execute(
             """
             SELECT id, handle, author, timestamp, date, text, summary, language, type, importance,
-                   categories_json, entities_json, urls_json, domains_json, hashtags_json, linked_pages_json,
+                   categories_json, entities_json, urls_json, domains_json, hashtags_json,
+                   local_json, local_note, local_tags_json, local_tags_flat, hidden, rating, linked_pages_json,
                    extracted_title, extracted_description, extracted_content, search_text, vector
             FROM bookmarks WHERE id = ?
             """,
@@ -1518,11 +1609,11 @@ def bookmark_context(bookmark_id: str, *, limit: int = 5, auto_refresh: bool = T
         ][:limit]
 
         previous_row = conn.execute(
-            "SELECT id FROM bookmarks WHERE date < ? ORDER BY date DESC LIMIT 1",
+            "SELECT id FROM bookmarks WHERE date < ? AND coalesce(hidden, 0) = 0 ORDER BY date DESC LIMIT 1",
             [anchor["date"]],
         ).fetchone()
         next_row = conn.execute(
-            "SELECT id FROM bookmarks WHERE date > ? ORDER BY date ASC LIMIT 1",
+            "SELECT id FROM bookmarks WHERE date > ? AND coalesce(hidden, 0) = 0 ORDER BY date ASC LIMIT 1",
             [anchor["date"]],
         ).fetchone()
 
@@ -1549,6 +1640,7 @@ def collect_stats(*, auto_refresh: bool = True, paths: IndexPaths | None = None)
             SELECT handle, author, date, language, type, importance, categories_json, domains_json,
                    urls_json, extracted_content, text, media_count
             FROM bookmarks
+            WHERE coalesce(hidden, 0) = 0
             """
         ).fetchall()
         authors = Counter()
@@ -1699,6 +1791,8 @@ def format_search_results(results: list[dict] | dict) -> str:
                 meta = " · ".join([result["date"], result["handle"], *labels])
                 if result.get("deleted"):
                     meta = f"[deleted] {meta}"
+                elif result.get("hidden"):
+                    meta = f"[hidden] {meta}"
                 why = f" [{', '.join(result['why'][:3])}]" if result.get("why") else ""
                 lines.append(f"{idx}. {meta}{why}")
                 lines.extend(_format_result_preview_lines(result))
@@ -1715,6 +1809,8 @@ def format_search_results(results: list[dict] | dict) -> str:
         meta = " · ".join([result["date"], result["handle"], *labels])
         if result.get("deleted"):
             meta = f"[deleted] {meta}"
+        elif result.get("hidden"):
+            meta = f"[hidden] {meta}"
         why = f" [{', '.join(result['why'][:3])}]" if result.get("why") else ""
         lines.append(f"{idx}. {meta}{why}")
         lines.extend(_format_result_preview_lines(result))
@@ -1729,7 +1825,7 @@ def format_list_results(results: list[dict]) -> str:
     lines: list[str] = []
     for result in results:
         labels = [label for label in [result["id"], result["date"], result["handle"], result["type"], *result["categories"][:2]] if label and label != "unknown"]
-        prefix = "[deleted] " if result.get("deleted") else ""
+        prefix = "[deleted] " if result.get("deleted") else "[hidden] " if result.get("hidden") else ""
         lines.append(f"{prefix}{' · '.join(labels)}")
         lines.extend("  " + line[3:] if line.startswith("   ") else line for line in _format_result_preview_lines(result))
         lines.extend("  " + line[3:] if line.startswith("   ") else line for line in _format_explain_lines(result))
@@ -1837,6 +1933,14 @@ def format_show_result(result: dict | None) -> str:
         lines.extend(["", f"categories: {', '.join(result['categories'])}"])
     if result["entities"]:
         lines.extend(["", f"entities: {', '.join(result['entities'])}"])
+    if result.get("tags"):
+        lines.extend(["", f"tags: {', '.join('#' + tag for tag in result['tags'])}"])
+    if result.get("rating") is not None:
+        lines.extend(["", f"rating: {result['rating']}/5"])
+    if result.get("note"):
+        lines.extend(["", "note", result["note"]])
+    if result.get("hidden"):
+        lines.extend(["", "hidden: true"])
     if result["domains"]:
         lines.extend(["", f"domains: {', '.join(result['domains'])}"])
     if result["hashtags"]:

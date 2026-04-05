@@ -22,6 +22,11 @@ uv run x-bookmarks sync --reconcile-only
 uv run x-bookmarks remove 2037620876179537989
 uv run x-bookmarks restore 2037620876179537989
 uv run x-bookmarks restore --all
+uv run x-bookmarks note 2037620876179537989 "revisit for collector tuning ideas"
+uv run x-bookmarks tag 2037620876179537989 favorite otel
+uv run x-bookmarks rate 2037620876179537989 5
+uv run x-bookmarks hide 2037620876179537989
+uv run x-bookmarks unhide 2037620876179537989
 ```
 
 Notes:
@@ -33,6 +38,7 @@ Notes:
 - `sync --extract`, `sync --categorize`, and `sync --regex` can continue the pipeline after import.
 - `remove` deletes locally across all synced files and records a tombstone.
 - `restore` rehydrates a locally removed bookmark from the sync archive.
+- `note`, `tag`, `untag`, `rate`, `hide`, and `unhide` update local metadata on active bookmarks.
 - `status` reports tombstone/archive counts from sync state.
 
 ## Index lifecycle
@@ -49,9 +55,11 @@ uv run x-bookmarks refresh --force
 ```bash
 uv run x-bookmarks search "observability"
 uv run x-bookmarks search "observability" --explain
+uv run x-bookmarks search "favorite" --hidden
 uv run x-bookmarks search "ai" --group-by category
 uv run x-bookmarks list --author @simonw --category "AI & Machine Learning"
 uv run x-bookmarks list --deleted
+uv run x-bookmarks list --hidden
 uv run x-bookmarks show 2037620876179537989
 uv run x-bookmarks show 2037620876179537989 --deleted
 uv run x-bookmarks show 2037620876179537989 --fetch-link
@@ -65,11 +73,14 @@ uv run x-bookmarks viz
 Notes:
 - `search` uses hybrid retrieval: SQLite FTS5 BM25 + local vector similarity fused with RRF.
 - `search --explain` shows matched fields, matched linked pages, and the BM25/vector RRF components for each result.
+- Local notes and tags are indexed and searchable.
 - `search`, `list`, `show`, `context`, `stats`, `domains`, and `status` support `--json`.
 - `search` supports `--group-by category|author|domain|year`.
 - `list` supports `--author`, `--category`, `--domain`, `--language`, `--type`, `--after`, and `--before`.
 - `list --deleted` shows locally removed bookmarks from the sync archive.
+- `list --hidden` shows bookmarks hidden from normal search/list/stats.
 - `show --deleted` shows one locally removed bookmark, including when and why it was deleted.
+- Hidden bookmarks are excluded from normal `search`, `list`, `stats`, `domains`, and `viz` output by default.
 - Terminal results now include tweet previews and linked-page context when extracted content exists, so you often do not need to open the URL.
 - `show --fetch-link` and `context --fetch-link` will extract the first external link on demand when no stored extract exists.
 - The persistent index now searches across all stored extracted link pages for a bookmark, not only the first link.

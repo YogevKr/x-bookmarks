@@ -20,7 +20,7 @@ from bookmark_query import (
     show_bookmark,
     show_deleted_bookmark,
 )
-from bookmark_sync import remove_bookmarks, sync_bookmarks
+from bookmark_sync import add_tags, hide_bookmarks, remove_bookmarks, set_note, set_rating, sync_bookmarks, unhide_bookmarks
 
 
 BOOKMARKS = {
@@ -264,6 +264,35 @@ class BookmarkIndexTest(unittest.TestCase):
         assert shown is not None
         self.assertTrue(shown["deleted"])
         self.assertEqual(shown["id"], "2")
+
+    def test_local_metadata_is_indexed_and_hidden_is_filtered(self) -> None:
+        sync_bookmarks(reconcile_only=True, paths=self.paths)
+        set_note("1", "favorite observability writeup", paths=self.paths)
+        add_tags("1", ["favorite", "otel"], paths=self.paths)
+        set_rating("1", 5, paths=self.paths)
+        hide_bookmarks(["1"], paths=self.paths)
+
+        visible = list_bookmarks(limit=10, paths=self.paths)
+        self.assertEqual({item["id"] for item in visible}, {"2", "3"})
+
+        hidden = list_bookmarks(hidden=True, limit=10, paths=self.paths)
+        self.assertEqual([item["id"] for item in hidden], ["1"])
+        self.assertTrue(hidden[0]["hidden"])
+        self.assertEqual(hidden[0]["rating"], 5)
+        self.assertEqual(set(hidden[0]["tags"]), {"favorite", "otel"})
+
+        searched = search_bookmarks("favorite", hidden=True, limit=5, paths=self.paths)
+        self.assertEqual(searched[0]["id"], "1")
+
+        shown = show_bookmark("1", paths=self.paths)
+        self.assertEqual(shown["note"], "favorite observability writeup")
+        self.assertEqual(set(shown["tags"]), {"favorite", "otel"})
+        self.assertEqual(shown["rating"], 5)
+        self.assertTrue(shown["hidden"])
+
+        unhide_bookmarks(["1"], paths=self.paths)
+        visible_again = list_bookmarks(limit=10, paths=self.paths)
+        self.assertEqual({item["id"] for item in visible_again}, {"1", "2", "3"})
 
     def test_doctor_report_detects_tombstone_archive_health(self) -> None:
         sync_bookmarks(reconcile_only=True, paths=self.paths)
