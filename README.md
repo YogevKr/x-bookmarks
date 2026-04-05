@@ -159,3 +159,6 @@ See [docs/cli.md](docs/cli.md).
 - Homebrew tap: `yogevkr/tap`
 - Formula: `yogevkr/tap/x-bookmarks`
 - License: MIT
+- Tag pushes now drive release automation through `.github/workflows/release.yml`
+- The workflow builds `x_bookmarks-<version>.tar.gz`, publishes a GitHub Release asset, and updates the tap formula to that asset URL
+- To enable tap updates from CI, add repo secret `HOMEBREW_TAP_TOKEN` with push access to `YogevKr/homebrew-tap`

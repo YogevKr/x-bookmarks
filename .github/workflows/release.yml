@@ -1,0 +1,123 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      asset_name: ${{ steps.meta.outputs.asset_name }}
+      asset_url: ${{ steps.meta.outputs.asset_url }}
+      asset_sha256: ${{ steps.meta.outputs.asset_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - uses: astral-sh/setup-uv@v6
+
+      - id: meta
+        name: Build sdist and compute release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          PYPROJECT_VERSION="$(python - <<'PY'
+          import tomllib
+          from pathlib import Path
+          data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          print(data["project"]["version"])
+          PY
+          )"
+          if [[ "$VERSION" != "$PYPROJECT_VERSION" ]]; then
+            echo "Tag version $VERSION does not match pyproject version $PYPROJECT_VERSION" >&2
+            exit 1
+          fi
+
+          rm -rf dist
+          uv build --sdist --out-dir dist
+
+          ASSET_NAME="$(basename dist/*.tar.gz)"
+          ASSET_SHA256="$(sha256sum "dist/${ASSET_NAME}" | awk '{print $1}')"
+          ASSET_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${ASSET_NAME}"
+
+          {
+            echo "tag=${TAG}"
+            echo "version=${VERSION}"
+            echo "asset_name=${ASSET_NAME}"
+            echo "asset_url=${ASSET_URL}"
+            echo "asset_sha256=${ASSET_SHA256}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Publish GitHub release and upload asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.tag }}"
+          ASSET_PATH="dist/${{ steps.meta.outputs.asset_name }}"
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" "${ASSET_PATH}" --clobber --repo "${GITHUB_REPOSITORY}"
+          else
+            gh release create "${TAG}" "${ASSET_PATH}" \
+              --title "${TAG}" \
+              --generate-notes \
+              --repo "${GITHUB_REPOSITORY}"
+          fi
+
+  update-homebrew-tap:
+    needs: release
+    if: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Clone tap repository
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/YogevKr/homebrew-tap.git" tap
+
+      - name: Render formula
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/render_homebrew_formula.py \
+            --asset-url "${{ needs.release.outputs.asset_url }}" \
+            --sha256 "${{ needs.release.outputs.asset_sha256 }}" \
+            --output tap/Formula/x-bookmarks.rb
+
+      - name: Commit and push formula update
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git -C tap diff --quiet -- Formula/x-bookmarks.rb; then
+            echo "Formula already up to date"
+            exit 0
+          fi
+          git -C tap config user.name "github-actions[bot]"
+          git -C tap config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C tap add Formula/x-bookmarks.rb
+          git -C tap commit -m "build(formula): bump x-bookmarks to ${{ needs.release.outputs.version }}"
+          git -C tap push origin HEAD:main
