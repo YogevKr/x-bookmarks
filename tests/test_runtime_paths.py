@@ -13,7 +13,17 @@ class RuntimePathsTest(unittest.TestCase):
     def test_default_paths_follow_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_dir = Path(tmpdir)
-            with mock.patch.dict(os.environ, {}, clear=False):
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "HOME": str(temp_dir),
+                    "XDG_CONFIG_HOME": str(temp_dir / ".config-root"),
+                    "X_BOOKMARKS_HOME": "",
+                    "X_BOOKMARKS_READ_ONLY": "",
+                    "X_BOOKMARKS_CONFIG": "",
+                },
+                clear=False,
+            ):
                 with mock.patch("pathlib.Path.cwd", return_value=temp_dir):
                     paths = default_paths()
             self.assertEqual(paths.base_dir, temp_dir.resolve())

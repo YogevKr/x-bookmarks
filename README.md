@@ -148,5 +148,6 @@ See [docs/cli.md](docs/cli.md).
 
 ## Publishing notes
 
-- Homebrew formula: not added yet
+- Homebrew tap: `yogevkr/tap`
+- Formula: `yogevkr/tap/x-bookmarks`
 - License: MIT
