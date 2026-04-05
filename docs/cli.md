@@ -34,6 +34,7 @@ Notes:
 - `extract` now stores richer per-link context in `linked_pages`, not just one primary extract.
 - `extract --force` upgrades existing bookmarks to the richer schema.
 - `extract --bookmark-id` lets you re-extract one bookmark without touching the whole corpus.
+- When full article extraction fails, `extract` now falls back to lightweight page metadata/text so more links still become searchable.
 - The first `sync` bootstraps local state from `bookmarks.json`.
 - Later `sync` runs detect file-side deletions in any local bookmark file, propagate them across all files, and refresh the persistent index.
 - `sync` runs extraction by default; use `--no-extract` to skip link fetching on import.
