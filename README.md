@@ -71,19 +71,48 @@ One good setup:
 - SSH Mac: single writer; runs `sync` and `watch`
 - this Mac: query-only; reads the synced workspace from iCloud
 
+Preferred config file on macOS:
+- `~/Library/Application Support/x-bookmarks/config.json`
+
+Schema:
+
+```json
+{
+  "base_dir": "~/Library/Mobile Documents/com~apple~CloudDocs/x-bookmarks",
+  "read_only": true
+}
+```
+
+Resolution order:
+- env: `X_BOOKMARKS_HOME`, `X_BOOKMARKS_READ_ONLY`
+- config file
+- current working directory
+
 Writer machine:
 
 ```bash
-export X_BOOKMARKS_HOME="$HOME/Library/Mobile Documents/com~apple~CloudDocs/x-bookmarks"
+mkdir -p "$HOME/Library/Application Support/x-bookmarks"
+cat > "$HOME/Library/Application Support/x-bookmarks/config.json" <<'JSON'
+{
+  "base_dir": "~/Library/Mobile Documents/com~apple~CloudDocs/x-bookmarks"
+}
+JSON
+
 x-bookmarks sync --input /path/to/bookmarks-export.json
-x-bookmarks launchd install --base-dir "$X_BOOKMARKS_HOME"
+x-bookmarks launchd install
 ```
 
 Query machine:
 
 ```bash
-export X_BOOKMARKS_HOME="$HOME/Library/Mobile Documents/com~apple~CloudDocs/x-bookmarks"
-export X_BOOKMARKS_READ_ONLY=1
+mkdir -p "$HOME/Library/Application Support/x-bookmarks"
+cat > "$HOME/Library/Application Support/x-bookmarks/config.json" <<'JSON'
+{
+  "base_dir": "~/Library/Mobile Documents/com~apple~CloudDocs/x-bookmarks",
+  "read_only": true
+}
+JSON
+
 x-bookmarks search "observability"
 x-bookmarks context 2037620876179537989
 ```

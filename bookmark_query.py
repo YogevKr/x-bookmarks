@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from bookmark_paths import read_only_mode, resolve_base_dir
+from bookmark_paths import config_path, read_only_mode, resolve_base_dir
 from text_repair import repair_value
 
 INDEX_VERSION = 4
@@ -840,6 +840,7 @@ def get_index_status(*, paths: IndexPaths | None = None) -> dict:
         "stale": stale,
         "reasons": reasons,
         "read_only": read_only_mode(),
+        "config_path": str(config_path()) if config_path() else None,
         "index_db": str(current_paths.index_db),
         "manifest_path": str(current_paths.manifest_file),
         "doc_count": len(bookmarks),

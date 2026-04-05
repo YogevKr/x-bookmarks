@@ -9,9 +9,19 @@ Behavior:
 - Local removals are tombstoned, so a later import does not silently resurrect them.
 - Query commands auto-refresh a stale index unless you pass `--no-refresh`.
 - The CLI reads data from the current working directory by default.
-- Set `X_BOOKMARKS_HOME=/path/to/data-dir` to target another bookmark workspace.
-- Set `X_BOOKMARKS_READ_ONLY=1` on a second machine to query a synced workspace without auto-refreshing it.
+- Preferred macOS config file: `~/Library/Application Support/x-bookmarks/config.json`
+- Supported config fallbacks: `~/.config/x-bookmarks/config.json`, `~/.x-bookmarks/config.json`
+- Env still works and wins over config: `X_BOOKMARKS_HOME`, `X_BOOKMARKS_READ_ONLY`
 - In read-only mode, write commands fail fast instead of mutating the shared workspace.
+
+Config schema:
+
+```json
+{
+  "base_dir": "~/Library/Mobile Documents/com~apple~CloudDocs/x-bookmarks",
+  "read_only": true
+}
+```
 
 ## Sync
 
@@ -76,13 +86,19 @@ Notes:
 - `launchd install` creates a LaunchAgent that starts `x-bookmarks watch` at login.
 - The watched workspace is pinned via `X_BOOKMARKS_HOME`, so it does not depend on the shell working directory.
 - Logs go to `.x-bookmarks/watch.stdout.log` and `.x-bookmarks/watch.stderr.log` inside the watched workspace.
-- Good shared setup: install `launchd` on one Mac only, point `--base-dir` at an iCloud folder, and query that same folder from another Mac with `X_BOOKMARKS_READ_ONLY=1`.
+- Good shared setup: install `launchd` on one Mac only, point it at an iCloud-backed `base_dir`, and query that same folder from another Mac with `read_only: true` in config.
 
 Example iCloud path:
 
 ```bash
-export X_BOOKMARKS_HOME="$HOME/Library/Mobile Documents/com~apple~CloudDocs/x-bookmarks"
-uv run x-bookmarks launchd install --base-dir "$X_BOOKMARKS_HOME"
+mkdir -p "$HOME/Library/Application Support/x-bookmarks"
+cat > "$HOME/Library/Application Support/x-bookmarks/config.json" <<'JSON'
+{
+  "base_dir": "~/Library/Mobile Documents/com~apple~CloudDocs/x-bookmarks"
+}
+JSON
+
+uv run x-bookmarks launchd install
 ```
 
 ## Query commands
@@ -119,7 +135,7 @@ Notes:
 - Terminal results now include tweet previews and linked-page context when extracted content exists, so you often do not need to open the URL.
 - `show --fetch-link` and `context --fetch-link` will extract the first external link on demand when no stored extract exists.
 - The persistent index now searches across all stored extracted link pages for a bookmark, not only the first link.
-- On a read-only query machine, set `X_BOOKMARKS_READ_ONLY=1` instead of repeating `--no-refresh` on every query.
+- On a read-only query machine, set `read_only: true` once in config instead of repeating `--no-refresh`.
 
 ## Agent access
 

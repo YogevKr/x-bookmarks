@@ -5,7 +5,7 @@ import argparse
 import json
 from pathlib import Path
 
-from bookmark_paths import read_only_mode
+from bookmark_paths import config_path, read_only_mode
 from bookmark_query import (
     collect_stats,
     doctor_report,
@@ -307,12 +307,14 @@ def _augment_context_with_link_context(result: dict | None, *, fetch_link: bool 
 
 def cmd_status(args: argparse.Namespace) -> None:
     status = get_index_status()
+    loaded_config = config_path()
     if args.json:
         print(json.dumps(status, indent=2, ensure_ascii=False))
         return
     print(f"Index DB: {status['index_db']}")
     print(f"Manifest: {status['manifest_path']}")
     print("Source of truth: bookmarks.json")
+    print(f"Config: {loaded_config or 'none'}")
     print(f"Fresh: {status['fresh']}")
     print(f"Doc count: source={status['doc_count']} indexed={status['indexed_count']}")
     print(f"Built at: {status['built_at']}")
