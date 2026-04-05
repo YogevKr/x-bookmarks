@@ -10,12 +10,14 @@ import sys
 import time
 from collections import Counter
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
-
-import anthropic
 
 from bookmark_paths import resolve_base_dir
 from text_repair import repair_value
+
+if TYPE_CHECKING:
+    import anthropic
 
 
 BATCH_SIZE = 10
@@ -153,8 +155,15 @@ def _get_cli_oauth_token() -> str | None:
         return None
 
 
-def _make_client() -> anthropic.Anthropic:
+def _make_client() -> Any:
     """Create Anthropic client: ANTHROPIC_API_KEY env → CLI OAuth token."""
+    try:
+        import anthropic
+    except ModuleNotFoundError as error:
+        raise RuntimeError(
+            "AI categorization requires the optional 'anthropic' dependency. "
+            "Install with `uv sync --extra ai`, `uv add anthropic`, or use `categorize --regex`."
+        ) from error
     if os.environ.get("ANTHROPIC_API_KEY"):
         return anthropic.Anthropic()
     token = _get_cli_oauth_token()
@@ -205,7 +214,7 @@ def build_bookmark_text(bookmark: dict) -> str:
     return "\n".join(parts)
 
 
-def categorize_batch(client: anthropic.Anthropic, batch: list[dict]) -> list[dict]:
+def categorize_batch(client: Any, batch: list[dict]) -> list[dict]:
     """Send a batch of bookmarks to Claude for categorization."""
     items = [f"[{idx}] {build_bookmark_text(bookmark)}" for idx, bookmark in enumerate(batch)]
     user_msg = f"Categorize these {len(batch)} bookmarks:\n\n" + "\n\n---\n\n".join(items)

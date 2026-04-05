@@ -113,5 +113,6 @@ uv run x-bookmarks categorize --regex
 
 Notes:
 - `categorize` uses Claude Haiku.
+- Claude mode requires the optional `anthropic` dependency, for example `uv sync --extra ai`.
 - `categorize --regex` is the cheap deterministic fallback.
 - Both modes write the same `categorized.json` shape consumed by search and agent-facing tools.

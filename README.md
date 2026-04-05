@@ -22,6 +22,12 @@ Install from GitHub:
 uv tool install --from git+https://github.com/YogevKr/x-bookmarks x-bookmarks
 ```
 
+Optional AI categorization dependency:
+
+```bash
+uv sync --extra ai
+```
+
 Run without installing:
 
 ```bash
@@ -73,6 +79,7 @@ All corpus data is intentionally local-only and ignored by git.
 - link extraction with metadata fallback and cached terminal failures
 - local delete/restore, notes, tags, ratings, and hidden state
 - stdio MCP server and local HTTP API
+- optional Claude-based categorization via the `ai` extra
 
 ## CLI docs
 
