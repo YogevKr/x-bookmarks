@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from bookmark_query import IndexPaths, default_paths, parse_timestamp, refresh_index
+from text_repair import repair_value
 
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
@@ -17,7 +18,7 @@ def _read_json(path: Path, *, strict: bool = True) -> dict | None:
         return None
     try:
         with path.open(encoding="utf-8") as handle:
-            return json.load(handle)
+            return repair_value(json.load(handle))
     except json.JSONDecodeError:
         if strict:
             raise
@@ -54,6 +55,7 @@ def _sort_bookmarks(bookmarks: list[dict]) -> list[dict]:
 
 
 def _canonical_payload(payload: dict) -> dict:
+    payload = repair_value(payload)
     bookmarks = [_normalize_bookmark(bookmark) for bookmark in payload.get("bookmarks", [])]
     return {
         "exportDate": payload.get("exportDate"),
@@ -65,11 +67,11 @@ def _canonical_payload(payload: dict) -> dict:
 
 def _load_import_payload(*, input_file: Path | None = None, stdin_text: str | None = None) -> dict:
     if stdin_text is not None:
-        return _canonical_payload(json.loads(stdin_text))
+        return _canonical_payload(repair_value(json.loads(stdin_text)))
     if input_file is None:
         raise ValueError("sync requires --input, --stdin, or --reconcile-only")
     with input_file.open(encoding="utf-8") as handle:
-        return _canonical_payload(json.load(handle))
+        return _canonical_payload(repair_value(json.load(handle)))
 
 
 def _reconcile_payload(base_payload: dict, existing_payload: dict | None) -> tuple[dict, dict]:

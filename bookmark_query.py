@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from bookmark_paths import resolve_base_dir
+from text_repair import repair_value
 
 INDEX_VERSION = 2
 VECTOR_DIM = 256
@@ -66,7 +67,7 @@ def _read_json(path: Path, *, strict: bool = True) -> dict | None:
         return None
     try:
         with path.open(encoding="utf-8") as handle:
-            return json.load(handle)
+            return repair_value(json.load(handle))
     except json.JSONDecodeError:
         if strict:
             raise

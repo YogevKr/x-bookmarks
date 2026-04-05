@@ -6,6 +6,7 @@ import sys
 import time
 
 from bookmark_paths import resolve_base_dir
+from text_repair import repair_value
 
 MAX_EXTRACT_CHARS = 5000
 
@@ -58,7 +59,7 @@ def run_extraction():
     enriched_file = base_dir / "enriched.json"
 
     with bookmarks_file.open(encoding="utf-8") as f:
-        data = json.load(f)
+        data = repair_value(json.load(f))
 
     bookmarks = data["bookmarks"]
 
@@ -66,7 +67,7 @@ def run_extraction():
     enriched_map = {}
     if enriched_file.exists():
         with enriched_file.open(encoding="utf-8") as f:
-            existing = json.load(f)
+            existing = repair_value(json.load(f))
         for bm in existing["bookmarks"]:
             if bm.get("extracted"):
                 enriched_map[bm["id"]] = bm["extracted"]

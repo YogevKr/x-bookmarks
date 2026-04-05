@@ -26,4 +26,5 @@ py-modules = [
     "extract",
     "main",
     "normalize",
+    "text_repair",
 ]

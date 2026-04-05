@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 import anthropic
 
 from bookmark_paths import resolve_base_dir
+from text_repair import repair_value
 
 
 BATCH_SIZE = 10
@@ -357,7 +358,7 @@ def _load_input_data(input_file: Path | None = None) -> tuple[Path, dict, list[d
     else:
         target = input_file
     with target.open(encoding="utf-8") as handle:
-        data = json.load(handle)
+        data = repair_value(json.load(handle))
     return target, data, data["bookmarks"]
 
 
@@ -365,7 +366,7 @@ def _load_existing_categorizations(output_file: Path, force: bool) -> dict[str, 
     cat_map: dict[str, dict] = {}
     if output_file.exists() and not force:
         with output_file.open(encoding="utf-8") as handle:
-            existing = json.load(handle)
+            existing = repair_value(json.load(handle))
         for bookmark in existing["bookmarks"]:
             if bookmark.get("ai"):
                 cat_map[bookmark["id"]] = bookmark["ai"]
