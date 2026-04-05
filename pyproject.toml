@@ -1,0 +1,28 @@
+[project]
+name = "x-bookmarks"
+version = "0.1.0"
+description = "Shell-friendly X bookmarks pipeline and query CLI"
+requires-python = ">=3.14"
+dependencies = [
+    "anthropic>=0.86.0",
+]
+
+[project.scripts]
+x-bookmarks = "main:main"
+
+[build-system]
+requires = ["setuptools>=69.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = [
+    "cli",
+    "bookmark_mcp",
+    "bookmark_query",
+    "bookmark_serve",
+    "bookmark_sync",
+    "categorize",
+    "extract",
+    "main",
+    "normalize",
+]

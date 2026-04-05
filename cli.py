@@ -1,0 +1,364 @@
+#!/usr/bin/env python3
+"""X Bookmarks CLI, pipeline, and agent-facing services."""
+
+import argparse
+import json
+from pathlib import Path
+
+from bookmark_query import (
+    collect_stats,
+    domain_counts,
+    ensure_index,
+    format_context_result,
+    format_list_results,
+    format_search_results,
+    format_show_result,
+    get_index_status,
+    list_bookmarks,
+    refresh_index,
+    render_viz,
+    search_bookmarks,
+    show_bookmark,
+    bookmark_context,
+)
+
+
+def cmd_extract(_args: argparse.Namespace) -> None:
+    print("Phase 1: Content extraction")
+    from extract import run_extraction
+
+    run_extraction()
+    refresh_index()
+
+
+def cmd_categorize(args: argparse.Namespace) -> None:
+    mode = "Regex categorization" if args.regex else "AI categorization"
+    print(f"Phase 2: {mode}")
+    from categorize import run_categorization
+
+    run_categorization(force=args.force, use_regex=args.regex)
+    refresh_index()
+
+
+def cmd_normalize(_args: argparse.Namespace) -> None:
+    print("Phase 2.5: Category normalization")
+    from normalize import run_normalization
+
+    run_normalization()
+    refresh_index()
+
+
+def cmd_all(args: argparse.Namespace) -> None:
+    cmd_extract(args)
+    cmd_categorize(argparse.Namespace(force=args.force, regex=args.regex))
+
+
+def cmd_sync(args: argparse.Namespace) -> None:
+    from bookmark_sync import read_stdin_json, sync_bookmarks
+
+    stdin_text = read_stdin_json() if args.stdin else None
+    result = sync_bookmarks(
+        input_file=args.input,
+        stdin_text=stdin_text,
+        reconcile_only=args.reconcile_only,
+        run_extract=args.extract,
+        run_categorize=args.categorize or args.regex,
+        use_regex=args.regex,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    print(f"Source of truth: {result['source_of_truth']}")
+    print(
+        f"Bookmarks: {result['bookmarks']['previous']} -> {result['bookmarks']['current']} "
+        f"(removed {result['bookmarks']['removed']})"
+    )
+    print(
+        "Derived: "
+        f"enriched retained_extracted={result['derived']['enriched']['retained_extracted']} · "
+        f"categorized retained_ai={result['derived']['categorized']['retained_ai']}"
+    )
+    print(f"Index: {result['index']['doc_count']} docs @ {result['index']['index_db']}")
+
+
+def _auto_refresh(args: argparse.Namespace) -> bool:
+    return not getattr(args, "no_refresh", False)
+
+
+def cmd_status(args: argparse.Namespace) -> None:
+    status = get_index_status()
+    if args.json:
+        print(json.dumps(status, indent=2, ensure_ascii=False))
+        return
+    print(f"Index DB: {status['index_db']}")
+    print(f"Manifest: {status['manifest_path']}")
+    print("Source of truth: bookmarks.json")
+    print(f"Fresh: {status['fresh']}")
+    print(f"Doc count: source={status['doc_count']} indexed={status['indexed_count']}")
+    print(f"Built at: {status['built_at']}")
+    print(f"Base source: {status['source_state']['base']}")
+    if status["reasons"]:
+        print("Reasons:")
+        for reason in status["reasons"]:
+            print(f"  - {reason}")
+
+
+def cmd_refresh(args: argparse.Namespace) -> None:
+    result = refresh_index(force=args.force)
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    print(f"Rebuilt: {result['rebuilt']}")
+    print(f"Doc count: {result['doc_count']}")
+    print(f"Index DB: {result['index_db']}")
+    print(f"Manifest: {result['manifest_path']}")
+    print(f"Built at: {result['built_at']}")
+
+
+def cmd_search(args: argparse.Namespace) -> None:
+    results = search_bookmarks(
+        args.query,
+        author=args.author,
+        category=args.category,
+        domain=args.domain,
+        language=args.language,
+        bookmark_type_value=args.bookmark_type,
+        after=args.after,
+        before=args.before,
+        limit=args.limit,
+        group_by=args.group_by,
+        auto_refresh=_auto_refresh(args),
+    )
+    if args.json:
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+        return
+    print(format_search_results(results))
+
+
+def cmd_list(args: argparse.Namespace) -> None:
+    results = list_bookmarks(
+        query=args.query,
+        author=args.author,
+        category=args.category,
+        domain=args.domain,
+        language=args.language,
+        bookmark_type_value=args.bookmark_type,
+        after=args.after,
+        before=args.before,
+        limit=args.limit,
+        offset=args.offset,
+        sort=args.sort,
+        auto_refresh=_auto_refresh(args),
+    )
+    if args.json:
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+        return
+    print(format_list_results(results))
+
+
+def cmd_show(args: argparse.Namespace) -> None:
+    result = show_bookmark(args.id, auto_refresh=_auto_refresh(args))
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    print(format_show_result(result))
+
+
+def cmd_context(args: argparse.Namespace) -> None:
+    result = bookmark_context(args.id, limit=args.limit, auto_refresh=_auto_refresh(args))
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    print(format_context_result(result))
+
+
+def cmd_stats(args: argparse.Namespace) -> None:
+    status = ensure_index(auto_refresh=_auto_refresh(args))
+    stats = collect_stats(auto_refresh=False)
+    stats["index"] = {"built_at": status.get("built_at"), "fresh": status.get("fresh")}
+    if args.json:
+        print(json.dumps(stats, indent=2, ensure_ascii=False))
+        return
+    print(f"Bookmarks: {stats['total_bookmarks']}")
+    print(f"Unique authors: {stats['unique_authors']}")
+    print(f"Date range: {stats['date_range']['earliest']} -> {stats['date_range']['latest']}")
+    print(
+        "Coverage: "
+        f"media={stats['with_media']} · urls={stats['with_urls']} · "
+        f"extracted={stats['with_extracted']} · avg_text_len={stats['average_text_length']}"
+    )
+    print("\nTop authors:")
+    for item in stats["top_authors"][:10]:
+        print(f"  {item['handle']}: {item['count']}")
+    print("\nLanguages:")
+    for item in stats["languages"]:
+        print(f"  {item['language']}: {item['count']}")
+    print("\nTypes:")
+    for item in stats["types"]:
+        print(f"  {item['type']}: {item['count']}")
+    print("\nTop categories:")
+    for item in stats["categories"][:10]:
+        print(f"  {item['name']}: {item['count']}")
+
+
+def cmd_domains(args: argparse.Namespace) -> None:
+    counts = domain_counts(
+        author=args.author,
+        category=args.category,
+        language=args.language,
+        bookmark_type_value=args.bookmark_type,
+        after=args.after,
+        before=args.before,
+        limit=args.limit,
+        auto_refresh=_auto_refresh(args),
+    )
+    if args.json:
+        print(json.dumps(counts, indent=2, ensure_ascii=False))
+        return
+    if not counts:
+        print("No domains found.")
+        return
+    for item in counts:
+        print(f"{item['domain']:<28} {item['count']}")
+
+
+def cmd_viz(args: argparse.Namespace) -> None:
+    print(render_viz(auto_refresh=_auto_refresh(args)))
+
+
+def cmd_mcp(_args: argparse.Namespace) -> None:
+    from bookmark_mcp import run_mcp_server
+
+    run_mcp_server()
+
+
+def cmd_serve(args: argparse.Namespace) -> None:
+    from bookmark_serve import run_http_server
+
+    run_http_server(host=args.host, port=args.port)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="X Bookmarks pipeline, persistent index, and agent CLI")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("extract", help="Phase 1: Extract content from URLs")
+
+    cat_parser = sub.add_parser("categorize", help="Phase 2: categorize bookmarks")
+    cat_parser.add_argument("--force", action="store_true", help="Re-categorize all bookmarks")
+    cat_parser.add_argument("--regex", action="store_true", help="Use keyword/regex categorization instead of Claude")
+
+    all_parser = sub.add_parser("all", help="Run full pipeline")
+    all_parser.add_argument("--force", action="store_true", help="Re-categorize all bookmarks")
+    all_parser.add_argument("--regex", action="store_true", help="Use keyword/regex categorization instead of Claude")
+
+    sub.add_parser("normalize", help="Phase 2.5: Normalize/merge categories")
+    sync_parser = sub.add_parser("sync", help="Import/reconcile source-of-truth bookmarks and propagate deletions")
+    sync_parser.add_argument("--input", type=Path, help="Exported bookmarks JSON to import")
+    sync_parser.add_argument("--stdin", action="store_true", help="Read exported bookmarks JSON from stdin")
+    sync_parser.add_argument("--reconcile-only", action="store_true", help="Use existing bookmarks.json and only prune/rebuild derived files")
+    sync_parser.add_argument("--extract", action="store_true", help="Run extraction after sync")
+    sync_parser.add_argument("--categorize", action="store_true", help="Run Claude categorization after sync")
+    sync_parser.add_argument("--regex", action="store_true", help="Run regex categorization after sync")
+    sync_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    status_parser = sub.add_parser("status", help="Show index freshness and source drift")
+    status_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    refresh_parser = sub.add_parser("refresh", help="Rebuild the persistent search index")
+    refresh_parser.add_argument("--force", action="store_true", help="Force a full rebuild")
+    refresh_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    search_parser = sub.add_parser("search", help="Hybrid search: BM25 + vector similarity + RRF")
+    search_parser.add_argument("query", help="Search query")
+    search_parser.add_argument("--author", help="Filter by author handle")
+    search_parser.add_argument("--category", help="Filter by category")
+    search_parser.add_argument("--domain", help="Filter by external domain")
+    search_parser.add_argument("--language", help="Filter by language")
+    search_parser.add_argument("--type", dest="bookmark_type", help="Filter by bookmark type")
+    search_parser.add_argument("--after", help="Only include bookmarks on/after YYYY-MM-DD")
+    search_parser.add_argument("--before", help="Only include bookmarks on/before YYYY-MM-DD")
+    search_parser.add_argument("--limit", type=int, default=20, help="Max results")
+    search_parser.add_argument("--group-by", choices=["category", "author", "domain", "year"], help="Group results")
+    search_parser.add_argument("--json", action="store_true", help="Emit JSON")
+    search_parser.add_argument("--no-refresh", action="store_true", help="Do not auto-refresh a stale index")
+
+    list_parser = sub.add_parser("list", help="Filter bookmarks from the index")
+    list_parser.add_argument("--query", help="Optional text query")
+    list_parser.add_argument("--author", help="Filter by author handle")
+    list_parser.add_argument("--category", help="Filter by category")
+    list_parser.add_argument("--domain", help="Filter by external domain")
+    list_parser.add_argument("--language", help="Filter by language")
+    list_parser.add_argument("--type", dest="bookmark_type", help="Filter by bookmark type")
+    list_parser.add_argument("--after", help="Only include bookmarks on/after YYYY-MM-DD")
+    list_parser.add_argument("--before", help="Only include bookmarks on/before YYYY-MM-DD")
+    list_parser.add_argument("--sort", choices=["date", "relevance"], default="date", help="Sort order")
+    list_parser.add_argument("--limit", type=int, default=30, help="Max results")
+    list_parser.add_argument("--offset", type=int, default=0, help="Offset into the result set")
+    list_parser.add_argument("--json", action="store_true", help="Emit JSON")
+    list_parser.add_argument("--no-refresh", action="store_true", help="Do not auto-refresh a stale index")
+
+    show_parser = sub.add_parser("show", help="Show a bookmark in detail")
+    show_parser.add_argument("id", help="Bookmark id")
+    show_parser.add_argument("--json", action="store_true", help="Emit JSON")
+    show_parser.add_argument("--no-refresh", action="store_true", help="Do not auto-refresh a stale index")
+
+    context_parser = sub.add_parser("context", help="360-degree bookmark context")
+    context_parser.add_argument("id", help="Bookmark id")
+    context_parser.add_argument("--limit", type=int, default=5, help="Related results per section")
+    context_parser.add_argument("--json", action="store_true", help="Emit JSON")
+    context_parser.add_argument("--no-refresh", action="store_true", help="Do not auto-refresh a stale index")
+
+    stats_parser = sub.add_parser("stats", help="Aggregate stats from the persistent index")
+    stats_parser.add_argument("--json", action="store_true", help="Emit JSON")
+    stats_parser.add_argument("--no-refresh", action="store_true", help="Do not auto-refresh a stale index")
+
+    domains_parser = sub.add_parser("domains", help="External domain distribution")
+    domains_parser.add_argument("--author", help="Filter by author handle")
+    domains_parser.add_argument("--category", help="Filter by category")
+    domains_parser.add_argument("--language", help="Filter by language")
+    domains_parser.add_argument("--type", dest="bookmark_type", help="Filter by bookmark type")
+    domains_parser.add_argument("--after", help="Only include bookmarks on/after YYYY-MM-DD")
+    domains_parser.add_argument("--before", help="Only include bookmarks on/before YYYY-MM-DD")
+    domains_parser.add_argument("--limit", type=int, default=25, help="Max domains")
+    domains_parser.add_argument("--json", action="store_true", help="Emit JSON")
+    domains_parser.add_argument("--no-refresh", action="store_true", help="Do not auto-refresh a stale index")
+
+    viz_parser = sub.add_parser("viz", help="Terminal dashboard")
+    viz_parser.add_argument("--no-refresh", action="store_true", help="Do not auto-refresh a stale index")
+
+    sub.add_parser("mcp", help="Run a local MCP stdio server")
+
+    serve_parser = sub.add_parser("serve", help="Run a local HTTP server")
+    serve_parser.add_argument("--host", default="127.0.0.1", help="Bind host")
+    serve_parser.add_argument("--port", type=int, default=4111, help="Bind port")
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    command_map = {
+        "extract": cmd_extract,
+        "categorize": cmd_categorize,
+        "normalize": cmd_normalize,
+        "all": cmd_all,
+        "sync": cmd_sync,
+        "status": cmd_status,
+        "refresh": cmd_refresh,
+        "search": cmd_search,
+        "list": cmd_list,
+        "show": cmd_show,
+        "context": cmd_context,
+        "stats": cmd_stats,
+        "domains": cmd_domains,
+        "viz": cmd_viz,
+        "mcp": cmd_mcp,
+        "serve": cmd_serve,
+    }
+    command_map[args.command](args)
+
+
+if __name__ == "__main__":
+    main()
