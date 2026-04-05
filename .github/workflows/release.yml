@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release, e.g. v0.1.5"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -22,6 +28,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Resolve release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag || github.ref_name }}"
+          git fetch --force --tags origin
+          git checkout "${TAG}"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
@@ -33,7 +47,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${{ inputs.tag || github.ref_name }}"
           VERSION="${TAG#v}"
           PYPROJECT_VERSION="$(python - <<'PY'
           import tomllib
@@ -81,7 +95,6 @@ jobs:
 
   update-homebrew-tap:
     needs: release
-    if: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
     runs-on: ubuntu-latest
     permissions: {}
     steps:
@@ -91,7 +104,21 @@ jobs:
         with:
           python-version: "3.14"
 
+      - id: gate
+        name: Check tap token
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${HOMEBREW_TAP_TOKEN}" ]]; then
+            echo "enabled=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "enabled=true" >> "${GITHUB_OUTPUT}"
+
       - name: Clone tap repository
+        if: steps.gate.outputs.enabled == 'true'
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         shell: bash
@@ -100,6 +127,7 @@ jobs:
           git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/YogevKr/homebrew-tap.git" tap
 
       - name: Render formula
+        if: steps.gate.outputs.enabled == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -109,6 +137,7 @@ jobs:
             --output tap/Formula/x-bookmarks.rb
 
       - name: Commit and push formula update
+        if: steps.gate.outputs.enabled == 'true'
         shell: bash
         run: |
           set -euo pipefail
