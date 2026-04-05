@@ -4,7 +4,17 @@ import unittest
 from pathlib import Path
 
 from bookmark_query import IndexPaths, get_index_status, list_bookmarks
-from bookmark_sync import add_tags, hide_bookmarks, remove_bookmarks, restore_bookmarks, set_note, set_rating, sync_bookmarks
+from bookmark_sync import (
+    add_tags,
+    export_local_metadata,
+    hide_bookmarks,
+    import_local_metadata,
+    remove_bookmarks,
+    restore_bookmarks,
+    set_note,
+    set_rating,
+    sync_bookmarks,
+)
 
 
 BASE_PAYLOAD = {
@@ -195,6 +205,27 @@ class BookmarkSyncTest(unittest.TestCase):
             self.assertEqual(set(bookmark["local"]["tags"]), {"favorite", "otel"})
             self.assertEqual(bookmark["local"]["rating"], 5)
             self.assertTrue(bookmark["local"]["hidden"])
+
+    def test_metadata_export_and_import(self) -> None:
+        sync_bookmarks(reconcile_only=True, paths=self.paths)
+        set_note("1", "worth revisiting", paths=self.paths)
+        add_tags("1", ["favorite"], paths=self.paths)
+
+        export_file = self.base / "metadata.json"
+        exported = export_local_metadata(export_file, paths=self.paths)
+        self.assertEqual(exported["count"], 1)
+
+        for name in ("bookmarks.json", "enriched.json", "categorized.json"):
+            payload = self._read_json(name)
+            for bookmark in payload["bookmarks"]:
+                bookmark.pop("local", None)
+            (self.base / name).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+        imported = import_local_metadata(export_file, paths=self.paths)
+        self.assertEqual(imported["mutation"]["updated_count"], 1)
+        restored = next(item for item in self._read_json("bookmarks.json")["bookmarks"] if item["id"] == "1")
+        self.assertEqual(restored["local"]["note"], "worth revisiting")
+        self.assertEqual(restored["local"]["tags"], ["favorite"])
 
 
 if __name__ == "__main__":

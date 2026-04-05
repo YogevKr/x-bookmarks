@@ -5,7 +5,7 @@ import subprocess
 import unittest
 from unittest import mock
 
-from extract import _normalize_target_url, extract_url, run_extraction
+from extract import _normalize_target_url, extract_url, list_extract_failures, retry_extract_failures, run_extraction
 
 
 class _FakeResponse:
@@ -159,6 +159,85 @@ class ExtractTest(unittest.TestCase):
             enriched = json.loads((base / "enriched.json").read_text(encoding="utf-8"))
             bookmark = enriched["bookmarks"][0]
             self.assertEqual(bookmark["extract_failures"]["http://api.openai.com"]["attempts"], 2)
+
+    def test_list_extract_failures_filters_by_domain(self) -> None:
+        payload = {
+            "bookmarks": [
+                {
+                    "id": "1",
+                    "author": "A",
+                    "handle": "@a",
+                    "extract_failures": {
+                        "https://github.com/acme/repo": {
+                            "reason": "timeout",
+                            "terminal": False,
+                            "attempts": 1,
+                            "failed_at": "2026-04-05T00:00:00+00:00",
+                        }
+                    },
+                }
+            ]
+        }
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "enriched.json").write_text(json.dumps(payload), encoding="utf-8")
+            with mock.patch("extract.resolve_base_dir", return_value=base):
+                rows = list_extract_failures(domain="github.com")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["bookmark_id"], "1")
+
+    def test_retry_extract_failures_retries_terminal_when_requested(self) -> None:
+        payload = {
+            "exportDate": "2026-04-05",
+            "source": "bookmark",
+            "bookmarks": [
+                {
+                    "id": "1",
+                    "author": "A",
+                    "handle": "@a",
+                    "timestamp": "2026-04-05T00:00:00Z",
+                    "text": "Post",
+                    "urls": ["http://api.openai.com"],
+                    "media": [],
+                    "hashtags": [],
+                    "extract_failures": {
+                        "http://api.openai.com": {
+                            "reason": "unsupported_api_endpoint",
+                            "terminal": True,
+                            "attempts": 2,
+                            "failed_at": "2026-04-05T00:00:00+00:00",
+                        }
+                    },
+                }
+            ],
+        }
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "bookmarks.json").write_text(json.dumps(payload), encoding="utf-8")
+            (base / "enriched.json").write_text(json.dumps(payload), encoding="utf-8")
+            with mock.patch("extract.resolve_base_dir", return_value=base):
+                with mock.patch(
+                    "extract._extract_url_with_status",
+                    return_value=(
+                        {
+                            "url": "http://api.openai.com",
+                            "title": "Recovered",
+                            "description": "",
+                            "content": "Recovered content",
+                            "preview": "Recovered content",
+                            "word_count": 2,
+                            "site_name": "OpenAI",
+                        },
+                        None,
+                    ),
+                ):
+                    with mock.patch("extract.time.sleep", return_value=None):
+                        result = retry_extract_failures(include_terminal=True)
+            self.assertEqual(result["matched_urls"], 1)
+            enriched = json.loads((base / "enriched.json").read_text(encoding="utf-8"))
+            bookmark = enriched["bookmarks"][0]
+            self.assertNotIn("extract_failures", bookmark)
+            self.assertEqual(bookmark["extracted"]["title"], "Recovered")
 
 
 if __name__ == "__main__":

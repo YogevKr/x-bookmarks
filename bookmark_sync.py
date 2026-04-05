@@ -572,6 +572,83 @@ def _metadata_result(*, paths: IndexPaths, state: dict, persisted: dict, mutatio
     }
 
 
+def export_local_metadata(output_file: Path, *, paths: IndexPaths | None = None) -> dict:
+    current_paths = paths or default_paths()
+    state = _load_sync_state(current_paths)
+    _reference_payload, bookmarks = _load_active_bookmarks(current_paths, state)
+    records = []
+    for bookmark in bookmarks:
+        local = _normalize_local_metadata(repair_value(bookmark.get("local")))
+        if not local:
+            continue
+        records.append(
+            {
+                "id": bookmark["id"],
+                "handle": bookmark.get("handle", ""),
+                "local": local,
+            }
+        )
+    records.sort(key=lambda item: item["id"])
+    payload = {
+        "version": 1,
+        "exported_at": _now_iso(),
+        "count": len(records),
+        "bookmarks": records,
+    }
+    _write_json(output_file, payload)
+    return {
+        "output": str(output_file),
+        "count": len(records),
+    }
+
+
+def import_local_metadata(input_file: Path, *, replace: bool = False, paths: IndexPaths | None = None) -> dict:
+    current_paths = paths or default_paths()
+    state = _load_sync_state(current_paths)
+    reference_payload, bookmarks = _load_active_bookmarks(current_paths, state)
+    with input_file.open(encoding="utf-8") as handle:
+        payload = repair_value(json.load(handle))
+
+    bookmark_map = {bookmark["id"]: bookmark for bookmark in bookmarks}
+    archive_map = state.setdefault("archive", {})
+    updated: list[str] = []
+    missing: list[str] = []
+
+    for record in payload.get("bookmarks", []):
+        bookmark_id = str(record.get("id", "")).strip()
+        if not bookmark_id:
+            continue
+        imported_local = _normalize_local_metadata(repair_value(record.get("local")))
+        target = bookmark_map.get(bookmark_id)
+        if target is None and bookmark_id in archive_map:
+            target = archive_map[bookmark_id]
+        if target is None:
+            missing.append(bookmark_id)
+            continue
+        current_local = _normalize_local_metadata(repair_value(target.get("local")))
+        merged_local = imported_local if replace else _normalize_local_metadata({**current_local, **imported_local})
+        if merged_local:
+            target["local"] = merged_local
+        else:
+            target.pop("local", None)
+        updated.append(bookmark_id)
+
+    bookmarks = _sort_bookmarks(list(bookmark_map.values()))
+    persisted = _persist_bookmarks(reference_payload=reference_payload, bookmarks=bookmarks, state=state, paths=current_paths)
+    return _metadata_result(
+        paths=current_paths,
+        state=state,
+        persisted=persisted,
+        mutation={
+            "type": "metadata-import",
+            "updated": updated,
+            "updated_count": len(updated),
+            "missing": missing,
+            "replace": replace,
+        },
+    )
+
+
 def _mutate_local_bookmarks(
     bookmark_ids: list[str],
     *,

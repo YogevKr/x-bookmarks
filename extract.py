@@ -510,7 +510,9 @@ def run_extraction(
     force: bool = False,
     limit: int | None = None,
     bookmark_id: str | None = None,
-) -> None:
+    bookmark_ids: set[str] | None = None,
+    retry_urls: dict[str, set[str]] | None = None,
+) -> dict:
     base_dir = resolve_base_dir()
     bookmarks_file = base_dir / "bookmarks.json"
     enriched_file = base_dir / "enriched.json"
@@ -541,12 +543,23 @@ def run_extraction(
     # Collect URLs to extract
     todo = []
     skipped_terminal = 0
+    selected_ids = {str(value) for value in (bookmark_ids or set())}
+    if bookmark_id:
+        selected_ids.add(str(bookmark_id))
+    retry_urls = {str(key): {str(url) for url in values} for key, values in (retry_urls or {}).items()}
+
     for bm in bookmarks:
-        if bookmark_id and bm["id"] != bookmark_id:
+        bm_id = str(bm["id"])
+        if selected_ids and bm_id not in selected_ids:
             continue
         urls = [u for u in bm.get("urls", []) if should_extract(u)][:MAX_LINKS_PER_BOOKMARK]
+        if retry_urls:
+            targets = retry_urls.get(bm_id)
+            if targets is None:
+                continue
+            urls = [url for url in urls if url in targets]
         if urls:
-            existing = enriched_map.get(bm["id"], {})
+            existing = enriched_map.get(bm_id, {})
             existing_pages = existing.get("linked_pages", [])
             existing_failures = existing.get("extract_failures", {})
             covered = {page.get("url") for page in existing_pages}
@@ -554,12 +567,12 @@ def run_extraction(
             for url in urls:
                 if not force and url in covered:
                     continue
-                if not force and existing_failures.get(url, {}).get("terminal"):
+                if not force and not retry_urls and existing_failures.get(url, {}).get("terminal"):
                     skipped_terminal += 1
                     continue
                 pending_urls.append(url)
             if force or pending_urls:
-                todo.append((bm["id"], pending_urls if pending_urls else urls))
+                todo.append((bm_id, pending_urls if pending_urls else urls))
 
     if limit is not None:
         todo = todo[:limit]
@@ -579,10 +592,11 @@ def run_extraction(
         results = list(existing_pages)
         bookmark_had_success = False
         bookmark_had_failure = False
+        allowed_retry_urls = retry_urls.get(bm_id, set()) if retry_urls else set()
         for url in urls:
             if not force and url in covered:
                 continue
-            if not force and failure_map.get(url, {}).get("terminal"):
+            if not force and failure_map.get(url, {}).get("terminal") and url not in allowed_retry_urls:
                 continue
             print(f"  [{i+1}/{len(todo)}] {url[:70]}...", end=" ", flush=True)
             result, failure = _extract_url_with_status(url)
@@ -619,16 +633,28 @@ def run_extraction(
         time.sleep(0.5)
 
     _save_enriched(data, bookmarks, enriched_map, enriched_file)
+    summary = {
+        "updated_bookmarks": extracted_count,
+        "extracted_pages": extracted_pages,
+        "failed_bookmarks": failed_count,
+        "total_enriched": len(enriched_map),
+        "matched_bookmarks": len(todo),
+        "matched_urls": sum(len(urls) for _, urls in todo),
+    }
     print(
         f"\nDone: {extracted_count} bookmarks updated, {extracted_pages} pages extracted, "
         f"{failed_count} failed, {len(enriched_map)} total enriched"
     )
+    return summary
 
 
 def _save_enriched(data: dict, bookmarks: list, enriched_map: dict, output_file):
     enriched_bookmarks = []
     for bm in bookmarks:
         enriched = {**bm}
+        enriched.pop("extracted", None)
+        enriched.pop("linked_pages", None)
+        enriched.pop("extract_failures", None)
         if bm["id"] in enriched_map:
             if enriched_map[bm["id"]].get("extracted"):
                 enriched["extracted"] = enriched_map[bm["id"]]["extracted"]
@@ -641,3 +667,93 @@ def _save_enriched(data: dict, bookmarks: list, enriched_map: dict, output_file)
     output = {**data, "bookmarks": enriched_bookmarks}
     with output_file.open("w", encoding="utf-8") as f:
         json.dump(output, f, indent=2, ensure_ascii=False)
+
+
+def list_extract_failures(
+    *,
+    bookmark_id: str | None = None,
+    domain: str | None = None,
+    terminal_only: bool = False,
+    limit: int | None = None,
+) -> list[dict]:
+    base_dir = resolve_base_dir()
+    enriched_file = base_dir / "enriched.json"
+    if not enriched_file.exists():
+        return []
+
+    with enriched_file.open(encoding="utf-8") as handle:
+        payload = repair_value(json.load(handle))
+
+    rows: list[dict] = []
+    for bookmark in payload.get("bookmarks", []):
+        bm_id = str(bookmark.get("id", ""))
+        if bookmark_id and bm_id != str(bookmark_id):
+            continue
+        for url, metadata in _normalize_failure_map(bookmark.get("extract_failures")).items():
+            effective_url = str(metadata.get("resolved_url") or metadata.get("normalized_url") or url)
+            failure_domain = _domain(effective_url or url)
+            if domain and failure_domain != str(domain).casefold():
+                continue
+            if terminal_only and not metadata.get("terminal"):
+                continue
+            rows.append(
+                {
+                    "bookmark_id": bm_id,
+                    "author": str(bookmark.get("author", "")),
+                    "handle": str(bookmark.get("handle", "")),
+                    "url": url,
+                    "domain": failure_domain,
+                    "reason": str(metadata.get("reason", "extract_failed")),
+                    "terminal": bool(metadata.get("terminal")),
+                    "attempts": int(metadata.get("attempts", 1) or 1),
+                    "failed_at": str(metadata.get("failed_at", "")),
+                    "normalized_url": str(metadata.get("normalized_url", "")),
+                    "resolved_url": str(metadata.get("resolved_url", "")),
+                }
+            )
+    rows.sort(key=lambda item: (item["failed_at"], item["bookmark_id"], item["url"]), reverse=True)
+    return rows[:limit] if limit is not None else rows
+
+
+def retry_extract_failures(
+    *,
+    bookmark_id: str | None = None,
+    domain: str | None = None,
+    include_terminal: bool = False,
+    limit: int | None = None,
+) -> dict:
+    failures = list_extract_failures(bookmark_id=bookmark_id, domain=domain, terminal_only=False, limit=limit)
+    selected = [item for item in failures if include_terminal or not item["terminal"]]
+    if not selected:
+        base_dir = resolve_base_dir()
+        enriched_count = 0
+        enriched_file = base_dir / "enriched.json"
+        if enriched_file.exists():
+            with enriched_file.open(encoding="utf-8") as handle:
+                payload = repair_value(json.load(handle))
+            enriched_count = sum(
+                1
+                for bookmark in payload.get("bookmarks", [])
+                if bookmark.get("linked_pages") or bookmark.get("extracted") or bookmark.get("extract_failures")
+            )
+        return {
+            "matched_bookmarks": 0,
+            "matched_urls": 0,
+            "updated_bookmarks": 0,
+            "extracted_pages": 0,
+            "failed_bookmarks": 0,
+            "total_enriched": enriched_count,
+        }
+
+    retry_map: dict[str, set[str]] = {}
+    for item in selected:
+        retry_map.setdefault(item["bookmark_id"], set()).add(item["url"])
+
+    result = run_extraction(
+        force=False,
+        bookmark_ids=set(retry_map),
+        retry_urls=retry_map,
+    )
+    result["matched_bookmarks"] = len(retry_map)
+    result["matched_urls"] = sum(len(urls) for urls in retry_map.values())
+    return result

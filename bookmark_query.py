@@ -5,11 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
+import shutil
 import sqlite3
 import struct
+import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -57,9 +61,41 @@ class IndexPaths:
     def sync_state_file(self) -> Path:
         return self.data_dir / "sync-state.json"
 
+    @property
+    def watch_state_file(self) -> Path:
+        return self.data_dir / "watch-state.json"
+
 
 def default_paths() -> IndexPaths:
     return IndexPaths(base_dir=resolve_base_dir())
+
+
+def app_info() -> dict:
+    argv0 = Path(sys.argv[0]).expanduser()
+    executable = None
+    if argv0.is_absolute() and argv0.exists():
+        executable = str(argv0.resolve())
+    else:
+        resolved = shutil.which(argv0.name or str(argv0)) or shutil.which("x-bookmarks")
+        if resolved:
+            executable = str(Path(resolved).resolve())
+    try:
+        version = importlib_metadata.version("x-bookmarks")
+    except importlib_metadata.PackageNotFoundError:
+        version = "unknown"
+    install_source = "unknown"
+    if executable:
+        if "/Cellar/" in executable or executable.startswith("/opt/homebrew/"):
+            install_source = "homebrew"
+        elif "/.local/bin/" in executable:
+            install_source = "uv"
+        elif "/.venv/bin/" in executable or "/venv/bin/" in executable:
+            install_source = "venv"
+    return {
+        "version": version,
+        "executable": executable,
+        "install_source": install_source,
+    }
 
 
 def _now_iso() -> str:
@@ -82,6 +118,10 @@ def _load_sync_state(paths: IndexPaths) -> dict:
     return _read_json(paths.sync_state_file, strict=False) or {}
 
 
+def _load_watch_state(paths: IndexPaths) -> dict:
+    return _read_json(paths.watch_state_file, strict=False) or {}
+
+
 def _sync_state_summary(paths: IndexPaths) -> dict:
     state = _load_sync_state(paths)
     tombstones = state.get("tombstones", {})
@@ -93,6 +133,20 @@ def _sync_state_summary(paths: IndexPaths) -> dict:
         "tombstone_count": len(tombstones),
         "archive_count": len(archive),
         "deleted_ids": sorted(tombstones),
+    }
+
+
+def _watch_state_summary(paths: IndexPaths) -> dict:
+    state = _load_watch_state(paths)
+    return {
+        "exists": paths.watch_state_file.exists(),
+        "path": str(paths.watch_state_file),
+        "last_watch_tick": state.get("last_watch_tick"),
+        "last_action": state.get("last_action"),
+        "last_refresh_at": state.get("last_refresh_at"),
+        "last_refresh_reason": state.get("last_refresh_reason"),
+        "last_error": state.get("last_error"),
+        "pid": state.get("pid"),
     }
 
 
@@ -339,6 +393,32 @@ def _truncate(text: str, limit: int) -> str:
 
 def _tokenize(text: str) -> list[str]:
     return [token for token in "".join(ch.casefold() if ch.isalnum() else " " for ch in text).split() if token]
+
+
+def _highlight_terms(text: str, terms: list[str]) -> str:
+    highlighted = text
+    for term in sorted({term for term in terms if term}, key=len, reverse=True):
+        pattern = re.compile(re.escape(term), re.IGNORECASE)
+        highlighted = pattern.sub(lambda match: f"[{match.group(0)}]", highlighted)
+    return highlighted
+
+
+def _snippet_for_text(text: str, terms: list[str], *, limit: int = 220) -> str:
+    clean = " ".join(text.translate(TEXT_TRANSLATION).split())
+    if not clean:
+        return ""
+    lowered = clean.casefold()
+    positions = [lowered.find(term) for term in terms if term and lowered.find(term) >= 0]
+    if positions:
+        start = max(0, min(positions) - max(20, limit // 3))
+    else:
+        start = 0
+    snippet = clean[start : start + limit].strip()
+    if start > 0:
+        snippet = "…" + snippet
+    if start + limit < len(clean):
+        snippet = snippet.rstrip() + "…"
+    return _highlight_terms(snippet, terms)
 
 
 def _char_ngrams(text: str, size: int = 3) -> list[str]:
@@ -804,6 +884,7 @@ def get_index_status(*, paths: IndexPaths | None = None) -> dict:
     source_state, bookmarks = _merge_bookmark_corpus(current_paths)
     manifest = _load_manifest(current_paths)
     sync_state = _sync_state_summary(current_paths)
+    watch_state = _watch_state_summary(current_paths)
     db_exists = current_paths.index_db.exists()
     reasons: list[str] = []
 
@@ -847,6 +928,7 @@ def get_index_status(*, paths: IndexPaths | None = None) -> dict:
         "indexed_count": indexed_count,
         "source_state": source_state,
         "sync_state": sync_state,
+        "watch_state": watch_state,
         "built_at": manifest.get("built_at") if manifest else None,
     }
 
@@ -1152,6 +1234,41 @@ def _terms_in_text(text: str, terms: list[str]) -> list[str]:
     return [term for term in terms if term and term in lowered]
 
 
+def _match_snippets(bookmark: dict, query: str) -> list[dict]:
+    terms = _dedupe(_tokenize(query.casefold()))
+    if not terms:
+        return []
+    snippets: list[dict] = []
+    for page in bookmark_link_pages(bookmark):
+        candidates = [
+            ("title", str(page.get("title", ""))),
+            ("description", str(page.get("description", ""))),
+            ("preview", str(page.get("preview", ""))),
+            ("content", str(page.get("content", ""))),
+        ]
+        best_field = None
+        best_terms: list[str] = []
+        best_text = ""
+        for field, text in candidates:
+            matched = _terms_in_text(text, terms)
+            if matched and len(matched) >= len(best_terms):
+                best_field = field
+                best_terms = matched
+                best_text = text
+        if not best_field:
+            continue
+        snippets.append(
+            {
+                "url": str(page.get("url", "")),
+                "title": str(page.get("title", "")),
+                "field": best_field,
+                "terms": best_terms,
+                "snippet": _snippet_for_text(best_text, best_terms),
+            }
+        )
+    return snippets[:2]
+
+
 def _explain_payload(
     result: dict,
     *,
@@ -1165,6 +1282,7 @@ def _explain_payload(
     bookmark = result["bookmark"]
     lowered_query = query.casefold().strip()
     terms = _dedupe(_tokenize(query.casefold()))
+    match_snippets = _match_snippets(bookmark, query)
     exact_phrase = bool(lowered_query and lowered_query in result["search_text"].casefold())
     field_values = {
         "text": str(bookmark.get("text", "")),
@@ -1204,6 +1322,7 @@ def _explain_payload(
                     "url": str(page.get("url", "")),
                     "title": str(page.get("title", "")),
                     "terms": page_terms,
+                    "snippet": _snippet_for_text(page_text, page_terms),
                 }
             )
 
@@ -1212,6 +1331,7 @@ def _explain_payload(
     exact_phrase_boost = 0.01 if exact_phrase else 0.0
     return {
         "matched_terms": matched_terms,
+        "match_snippets": match_snippets,
         "matched_fields": matched_fields,
         "matched_link_pages": matched_link_pages,
         "exact_phrase": exact_phrase,
@@ -1238,6 +1358,7 @@ def _result_payload(
     explain: dict | None = None,
 ) -> dict:
     bookmark = result["bookmark"]
+    match_snippets = _match_snippets(bookmark, query or "") if query else []
     payload = {
         "id": result["id"],
         "author": result["author"],
@@ -1265,6 +1386,7 @@ def _result_payload(
         "linked_preview": bookmark_link_preview(bookmark),
         "linked_url": bookmark_link_url(bookmark),
         "linked_site": bookmark_link_site(bookmark),
+        "match_snippets": match_snippets,
         "score": round(score, 6) if score is not None else None,
         "why": _match_reasons(result, query or "", bm25_rank, vector_rank) if query else [],
         "deleted": bool(result.get("deleted")),
@@ -1884,6 +2006,9 @@ def _format_result_preview_lines(result: dict) -> list[str]:
         lines.append(f"   link: {linked_description}")
     elif linked_preview and linked_preview.casefold() != tweet_preview.casefold():
         lines.append(f"   link: {linked_preview}")
+    match_snippets = result.get("match_snippets", [])
+    if match_snippets:
+        lines.append(f"   match: {match_snippets[0]['snippet']}")
     return lines
 
 
@@ -1906,6 +2031,8 @@ def _format_explain_lines(result: dict) -> list[str]:
     if matched_link_pages:
         page = matched_link_pages[0]
         lines.append(f"   matched link: {page.get('title') or page.get('url') or '(untitled)'}")
+        if page.get("snippet"):
+            lines.append(f"   snippet: {page['snippet']}")
     return lines
 
 

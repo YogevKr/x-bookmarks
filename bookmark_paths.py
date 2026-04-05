@@ -54,9 +54,41 @@ def _load_config() -> tuple[dict, Path | None]:
     return {}, None
 
 
+def read_config() -> dict:
+    return dict(_load_config()[0])
+
+
 def config_path() -> Path | None:
     path = _load_config()[1]
     return path.resolve() if path else None
+
+
+def preferred_config_path() -> Path:
+    return _config_candidates()[0].expanduser().resolve()
+
+
+def write_config(
+    *,
+    base_dir: str | Path | None = None,
+    read_only: bool | None = None,
+    path: str | Path | None = None,
+) -> tuple[Path, dict]:
+    config = read_config()
+    target_path = Path(path).expanduser().resolve() if path else preferred_config_path()
+
+    if base_dir is not None:
+        config["base_dir"] = str(Path(base_dir).expanduser())
+    if read_only is not None:
+        if read_only:
+            config["read_only"] = True
+        else:
+            config.pop("read_only", None)
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    with target_path.open("w", encoding="utf-8") as handle:
+        json.dump(config, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
+    return target_path, config
 
 
 def resolve_base_dir() -> Path:

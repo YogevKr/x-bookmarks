@@ -23,6 +23,21 @@ Config schema:
 }
 ```
 
+Config helpers:
+
+```bash
+uv run x-bookmarks version
+uv run x-bookmarks config show
+uv run x-bookmarks config init --writer --icloud
+uv run x-bookmarks config init --reader --icloud
+uv run x-bookmarks config init --base-dir ~/x-bookmarks --force
+```
+
+Notes:
+- `version` shows the installed package version and executable path.
+- `config init` writes the preferred config file for the current machine.
+- `status` now includes binary path, install source, config path, and latest watch heartbeat.
+
 ## Sync
 
 ```bash
@@ -40,6 +55,8 @@ uv run x-bookmarks tag 2037620876179537989 favorite otel
 uv run x-bookmarks rate 2037620876179537989 5
 uv run x-bookmarks hide 2037620876179537989
 uv run x-bookmarks unhide 2037620876179537989
+uv run x-bookmarks metadata-export --output /tmp/x-bookmarks-metadata.json
+uv run x-bookmarks metadata-import --input /tmp/x-bookmarks-metadata.json
 ```
 
 Notes:
@@ -55,6 +72,8 @@ Notes:
 - `remove` deletes locally across all synced files and records a tombstone.
 - `restore` rehydrates a locally removed bookmark from the sync archive.
 - `note`, `tag`, `untag`, `rate`, `hide`, and `unhide` update local metadata on active bookmarks.
+- `metadata-export` writes local notes/tags/ratings/hidden state into a portable JSON file.
+- `metadata-import` restores that local metadata and can merge or replace it.
 - `status` reports tombstone/archive counts from sync state.
 
 ## Index lifecycle
@@ -62,6 +81,8 @@ Notes:
 ```bash
 uv run x-bookmarks status
 uv run x-bookmarks doctor
+uv run x-bookmarks extract-failures
+uv run x-bookmarks retry-failures --domain github.com
 uv run x-bookmarks refresh
 uv run x-bookmarks refresh --force
 uv run x-bookmarks watch
@@ -71,6 +92,9 @@ uv run x-bookmarks watch --once --json
 Notes:
 - `watch` polls local source files and refreshes the SQLite index whenever they drift.
 - `watch` does not require a background database service; it is just a long-running CLI loop.
+- `watch` now persists a heartbeat in `.x-bookmarks/watch-state.json`.
+- `extract-failures` lists cached extraction misses with domain, attempts, and terminal/retryable state.
+- `retry-failures` reruns those stored misses, and `--terminal` includes failures previously marked terminal.
 - index rebuilds now checkpoint the SQLite WAL, which is friendlier for iCloud-synced workspaces.
 
 ## macOS launch agent
@@ -124,6 +148,7 @@ uv run x-bookmarks viz
 Notes:
 - `search` uses hybrid retrieval: SQLite FTS5 BM25 + local vector similarity fused with RRF.
 - `search --explain` shows matched fields, matched linked pages, and the BM25/vector RRF components for each result.
+- query results now surface highlighted match snippets from extracted linked-page text when available.
 - Local notes and tags are indexed and searchable.
 - `search`, `list`, `show`, `context`, `stats`, `domains`, and `status` support `--json`.
 - `search` supports `--group-by category|author|domain|year`.

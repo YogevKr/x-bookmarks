@@ -33,10 +33,12 @@ class CliSurfaceTest(unittest.TestCase):
         search_args = parser.parse_args(["search", "observability", "--explain"])
         doctor_args = parser.parse_args(["doctor", "--json"])
         watch_args = parser.parse_args(["watch", "--once", "--json"])
+        version_args = parser.parse_args(["version", "--json"])
         self.assertTrue(search_args.explain)
         self.assertTrue(doctor_args.json)
         self.assertTrue(watch_args.once)
         self.assertTrue(watch_args.json)
+        self.assertTrue(version_args.json)
 
     def test_launchd_parse(self) -> None:
         parser = build_parser()
@@ -48,6 +50,28 @@ class CliSurfaceTest(unittest.TestCase):
         self.assertTrue(install_args.json)
         self.assertEqual(status_args.launchd_command, "status")
         self.assertEqual(uninstall_args.launchd_command, "uninstall")
+
+    def test_config_parse(self) -> None:
+        parser = build_parser()
+        show_args = parser.parse_args(["config", "show", "--json"])
+        init_args = parser.parse_args(["config", "init", "--reader", "--icloud", "--force"])
+        self.assertEqual(show_args.config_command, "show")
+        self.assertTrue(init_args.reader)
+        self.assertTrue(init_args.icloud)
+        self.assertTrue(init_args.force)
+
+    def test_failure_and_metadata_parse(self) -> None:
+        parser = build_parser()
+        failures_args = parser.parse_args(["extract-failures", "--domain", "github.com", "--json"])
+        retry_args = parser.parse_args(["retry-failures", "--terminal", "--limit", "5"])
+        export_args = parser.parse_args(["metadata-export", "--output", "/tmp/meta.json"])
+        import_args = parser.parse_args(["metadata-import", "--input", "/tmp/meta.json", "--replace"])
+        self.assertEqual(failures_args.domain, "github.com")
+        self.assertTrue(failures_args.json)
+        self.assertTrue(retry_args.terminal)
+        self.assertEqual(retry_args.limit, 5)
+        self.assertEqual(str(export_args.output), "/tmp/meta.json")
+        self.assertTrue(import_args.replace)
 
     def test_local_metadata_commands_parse(self) -> None:
         parser = build_parser()

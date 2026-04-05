@@ -5,8 +5,9 @@ import argparse
 import json
 from pathlib import Path
 
-from bookmark_paths import config_path, read_only_mode
+from bookmark_paths import config_path, preferred_config_path, read_config, read_only_mode, write_config
 from bookmark_query import (
+    app_info,
     collect_stats,
     doctor_report,
     domain_counts,
@@ -29,9 +30,15 @@ from bookmark_query import (
 def _require_writable(action: str) -> None:
     if read_only_mode():
         raise SystemExit(
-            f"{action} is disabled when X_BOOKMARKS_READ_ONLY=1. "
-            "Unset it on the writer machine."
+            f"{action} is disabled in read-only mode. "
+            "Unset X_BOOKMARKS_READ_ONLY or update config on the writer machine."
         )
+
+
+def _status_payload() -> dict:
+    status = get_index_status()
+    status["app"] = app_info()
+    return status
 
 
 def cmd_watch(args: argparse.Namespace) -> None:
@@ -306,11 +313,13 @@ def _augment_context_with_link_context(result: dict | None, *, fetch_link: bool 
 
 
 def cmd_status(args: argparse.Namespace) -> None:
-    status = get_index_status()
-    loaded_config = config_path()
+    status = _status_payload()
+    loaded_config = status.get("config_path") or config_path()
     if args.json:
         print(json.dumps(status, indent=2, ensure_ascii=False))
         return
+    print(f"Version: {status['app']['version']}")
+    print(f"Executable: {status['app']['executable'] or 'unknown'} ({status['app']['install_source']})")
     print(f"Index DB: {status['index_db']}")
     print(f"Manifest: {status['manifest_path']}")
     print("Source of truth: bookmarks.json")
@@ -326,10 +335,60 @@ def cmd_status(args: argparse.Namespace) -> None:
         f"archive={status['sync_state']['archive_count']} · "
         f"updated_at={status['sync_state']['updated_at']}"
     )
+    watch_state = status.get("watch_state", {})
+    if watch_state.get("last_watch_tick") or watch_state.get("last_error"):
+        print(
+            "Watch: "
+            f"tick={watch_state.get('last_watch_tick')} · "
+            f"action={watch_state.get('last_action')} · "
+            f"refresh_at={watch_state.get('last_refresh_at')} · "
+            f"reason={watch_state.get('last_refresh_reason')}"
+        )
+        if watch_state.get("last_error"):
+            print(f"Last watch error: {watch_state['last_error']}")
     if status["reasons"]:
         print("Reasons:")
         for reason in status["reasons"]:
             print(f"  - {reason}")
+
+
+def cmd_version(args: argparse.Namespace) -> None:
+    info = app_info()
+    if args.json:
+        print(json.dumps(info, indent=2, ensure_ascii=False))
+        return
+    print(f"x-bookmarks {info['version']}")
+    if info.get("executable"):
+        print(info["executable"])
+
+
+def cmd_config(args: argparse.Namespace) -> None:
+    if args.config_command == "show":
+        payload = {
+            "path": str(config_path() or preferred_config_path()),
+            "config": read_config(),
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            return
+        print(f"Path: {payload['path']}")
+        print(json.dumps(payload["config"], indent=2, ensure_ascii=False))
+        return
+
+    base_dir = args.base_dir
+    if args.icloud:
+        base_dir = Path("~/Library/Mobile Documents/com~apple~CloudDocs/x-bookmarks").expanduser()
+    read_only = True if args.reader else False if args.writer else None
+    target_path = preferred_config_path() if args.path is None else args.path.expanduser().resolve()
+    if target_path.exists() and not args.force:
+        raise SystemExit(f"config file already exists: {target_path} (use --force)")
+    path, payload = write_config(base_dir=base_dir, read_only=read_only, path=target_path)
+    result = {"path": str(path), "config": payload}
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    print(f"Wrote config: {path}")
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
 def cmd_refresh(args: argparse.Namespace) -> None:
@@ -359,6 +418,71 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     )
     for check in report["checks"]:
         print(f"{check['status'].upper():<5} {check['name']}: {check['detail']}")
+
+
+def cmd_extract_failures(args: argparse.Namespace) -> None:
+    from extract import list_extract_failures
+
+    failures = list_extract_failures(
+        bookmark_id=args.bookmark_id,
+        domain=args.domain,
+        terminal_only=args.terminal,
+        limit=args.limit,
+    )
+    if args.json:
+        print(json.dumps(failures, indent=2, ensure_ascii=False))
+        return
+    if not failures:
+        print("No extraction failures found.")
+        return
+    for item in failures:
+        status = "terminal" if item["terminal"] else "retryable"
+        print(f"{item['bookmark_id']} · {item['handle']} · {item['domain']} · {status}")
+        print(f"  {item['url']}")
+        print(f"  reason={item['reason']} attempts={item['attempts']} failed_at={item['failed_at']}")
+
+
+def cmd_retry_failures(args: argparse.Namespace) -> None:
+    _require_writable("retry-failures")
+    from extract import retry_extract_failures
+
+    result = retry_extract_failures(
+        bookmark_id=args.bookmark_id,
+        domain=args.domain,
+        include_terminal=args.terminal,
+        limit=args.limit,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    print(
+        f"Retried bookmarks={result['matched_bookmarks']} urls={result['matched_urls']} "
+        f"updated={result['updated_bookmarks']} pages={result['extracted_pages']} failed={result['failed_bookmarks']}"
+    )
+
+
+def cmd_metadata_export(args: argparse.Namespace) -> None:
+    from bookmark_sync import export_local_metadata
+
+    result = export_local_metadata(args.output)
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    print(f"Exported metadata: {result['count']} bookmarks -> {result['output']}")
+
+
+def cmd_metadata_import(args: argparse.Namespace) -> None:
+    _require_writable("metadata-import")
+    from bookmark_sync import import_local_metadata
+
+    result = import_local_metadata(args.input, replace=args.replace)
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    print(
+        f"Imported metadata: updated={result['mutation']['updated_count']} "
+        f"missing={len(result['mutation']['missing'])} replaced={result['mutation']['replace']}"
+    )
 
 
 def cmd_search(args: argparse.Namespace) -> None:
@@ -492,6 +616,7 @@ def cmd_serve(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="X Bookmarks pipeline, persistent index, and agent CLI")
+    parser.add_argument("--version", action="version", version=f"x-bookmarks {app_info()['version']}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     extract_parser = sub.add_parser("extract", help="Phase 1: Extract content from URLs")
@@ -561,6 +686,23 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser = sub.add_parser("status", help="Show index freshness and source drift")
     status_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
+    version_parser = sub.add_parser("version", help="Show CLI version and executable path")
+    version_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    config_parser = sub.add_parser("config", help="Show or initialize runtime config")
+    config_sub = config_parser.add_subparsers(dest="config_command", required=True)
+    config_show = config_sub.add_parser("show", help="Show current config and config path")
+    config_show.add_argument("--json", action="store_true", help="Emit JSON")
+    config_init = config_sub.add_parser("init", help="Write a config file")
+    role_group = config_init.add_mutually_exclusive_group()
+    role_group.add_argument("--writer", action="store_true", help="Configure this machine as the writer")
+    role_group.add_argument("--reader", action="store_true", help="Configure this machine as read-only")
+    config_init.add_argument("--icloud", action="store_true", help="Use the default iCloud x-bookmarks workspace path")
+    config_init.add_argument("--base-dir", type=Path, help="Explicit workspace path")
+    config_init.add_argument("--path", type=Path, help="Override config file path")
+    config_init.add_argument("--force", action="store_true", help="Overwrite an existing config file")
+    config_init.add_argument("--json", action="store_true", help="Emit JSON")
+
     refresh_parser = sub.add_parser("refresh", help="Rebuild the persistent search index")
     refresh_parser.add_argument("--force", action="store_true", help="Force a full rebuild")
     refresh_parser.add_argument("--json", action="store_true", help="Emit JSON")
@@ -586,6 +728,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor_parser = sub.add_parser("doctor", help="Check source files, index state, and sync-state health")
     doctor_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    failures_parser = sub.add_parser("extract-failures", help="List stored extraction failures")
+    failures_parser.add_argument("--bookmark-id", help="Only show failures for one bookmark id")
+    failures_parser.add_argument("--domain", help="Only show failures for one domain")
+    failures_parser.add_argument("--terminal", action="store_true", help="Only show terminal failures")
+    failures_parser.add_argument("--limit", type=int, help="Max failures to show")
+    failures_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    retry_parser = sub.add_parser("retry-failures", help="Retry stored extraction failures")
+    retry_parser.add_argument("--bookmark-id", help="Only retry failures for one bookmark id")
+    retry_parser.add_argument("--domain", help="Only retry failures for one domain")
+    retry_parser.add_argument("--terminal", action="store_true", help="Include terminal failures")
+    retry_parser.add_argument("--limit", type=int, help="Max failed URLs to retry")
+    retry_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    metadata_export_parser = sub.add_parser("metadata-export", help="Export local notes/tags/ratings/hidden state")
+    metadata_export_parser.add_argument("--output", type=Path, required=True, help="Where to write metadata JSON")
+    metadata_export_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    metadata_import_parser = sub.add_parser("metadata-import", help="Import local notes/tags/ratings/hidden state")
+    metadata_import_parser.add_argument("--input", type=Path, required=True, help="Metadata JSON file to import")
+    metadata_import_parser.add_argument("--replace", action="store_true", help="Replace local metadata instead of merging")
+    metadata_import_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
     search_parser = sub.add_parser("search", help="Hybrid search: BM25 + vector similarity + RRF")
     search_parser.add_argument("query", help="Search query")
@@ -679,10 +844,16 @@ def main(argv: list[str] | None = None) -> None:
         "hide": cmd_hide,
         "unhide": cmd_unhide,
         "status": cmd_status,
+        "version": cmd_version,
+        "config": cmd_config,
         "refresh": cmd_refresh,
         "watch": cmd_watch,
         "launchd": cmd_launchd,
         "doctor": cmd_doctor,
+        "extract-failures": cmd_extract_failures,
+        "retry-failures": cmd_retry_failures,
+        "metadata-export": cmd_metadata_export,
+        "metadata-import": cmd_metadata_import,
         "search": cmd_search,
         "list": cmd_list,
         "show": cmd_show,

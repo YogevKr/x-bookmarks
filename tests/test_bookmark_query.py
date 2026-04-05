@@ -187,6 +187,8 @@ class BookmarkIndexTest(unittest.TestCase):
     def test_search_matches_secondary_link_content(self) -> None:
         results = search_bookmarks("collector tuning", limit=5, paths=self.paths)
         self.assertEqual(results[0]["id"], "1")
+        self.assertTrue(results[0]["match_snippets"])
+        self.assertIn("[collector]", results[0]["match_snippets"][0]["snippet"].casefold())
 
     def test_grouped_search(self) -> None:
         results = search_bookmarks("ai", limit=5, group_by="category", paths=self.paths)
@@ -215,6 +217,7 @@ class BookmarkIndexTest(unittest.TestCase):
         self.assertIn("tweet:", output)
         self.assertIn("link:", output)
         self.assertIn("explain:", output)
+        self.assertIn("match:", output)
 
         shown = show_bookmark("1", paths=self.paths)
         show_output = format_show_result(shown)

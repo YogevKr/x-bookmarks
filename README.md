@@ -36,6 +36,13 @@ uv run x-bookmarks --help
 
 ## Quickstart
 
+Initialize config once:
+
+```bash
+uv run x-bookmarks config init --writer --icloud
+uv run x-bookmarks config show
+```
+
 Import an export and build local state:
 
 ```bash
@@ -45,6 +52,8 @@ uv run x-bookmarks sync --input /path/to/bookmarks-export.json
 Search:
 
 ```bash
+uv run x-bookmarks version
+uv run x-bookmarks status
 uv run x-bookmarks search "observability"
 uv run x-bookmarks search "agent engineering" --explain
 ```
@@ -65,6 +74,13 @@ uv run x-bookmarks watch
 uv run x-bookmarks launchd install
 ```
 
+Portable local metadata:
+
+```bash
+uv run x-bookmarks metadata-export --output /tmp/x-bookmarks-metadata.json
+uv run x-bookmarks metadata-import --input /tmp/x-bookmarks-metadata.json
+```
+
 ## Shared iCloud workspace
 
 One good setup:
@@ -73,6 +89,7 @@ One good setup:
 
 Preferred config file on macOS:
 - `~/Library/Application Support/x-bookmarks/config.json`
+- other supported paths: `~/.config/x-bookmarks/config.json`, `~/.x-bookmarks/config.json`, `~/.x-bookmark/config.json`
 
 Schema:
 
@@ -91,13 +108,7 @@ Resolution order:
 Writer machine:
 
 ```bash
-mkdir -p "$HOME/Library/Application Support/x-bookmarks"
-cat > "$HOME/Library/Application Support/x-bookmarks/config.json" <<'JSON'
-{
-  "base_dir": "~/Library/Mobile Documents/com~apple~CloudDocs/x-bookmarks"
-}
-JSON
-
+uv run x-bookmarks config init --writer --icloud
 x-bookmarks sync --input /path/to/bookmarks-export.json
 x-bookmarks launchd install
 ```
@@ -105,14 +116,7 @@ x-bookmarks launchd install
 Query machine:
 
 ```bash
-mkdir -p "$HOME/Library/Application Support/x-bookmarks"
-cat > "$HOME/Library/Application Support/x-bookmarks/config.json" <<'JSON'
-{
-  "base_dir": "~/Library/Mobile Documents/com~apple~CloudDocs/x-bookmarks",
-  "read_only": true
-}
-JSON
-
+uv run x-bookmarks config init --reader --icloud
 x-bookmarks search "observability"
 x-bookmarks context 2037620876179537989
 ```
@@ -122,6 +126,7 @@ Notes:
 - read-only mode disables query auto-refresh on the second machine
 - read-only mode also blocks write commands like `sync`, `refresh`, `watch`, `extract`, and local metadata edits
 - the index is checkpointed after rebuilds so iCloud sync has less SQLite WAL churn
+- `status` shows the active binary path, install source, config path, and latest watch heartbeat
 
 ## Data model
 
@@ -136,8 +141,11 @@ All corpus data is intentionally local-only and ignored by git.
 
 - persistent SQLite FTS index with hybrid ranking
 - full-text search, filters, stats, domains, and terminal viz
+- `version`, richer `status`, and guided `config init`
 - link extraction with metadata fallback and cached terminal failures
+- extraction failure inspection and targeted retries
 - local delete/restore, notes, tags, ratings, and hidden state
+- metadata export/import for local notes, tags, ratings, and hidden state
 - stdio MCP server and local HTTP API
 - watch mode and macOS launch-at-login support via `launchd`
 - optional Claude-based categorization via the `ai` extra
