@@ -89,6 +89,8 @@ def _normalize_bookmark(bookmark: dict) -> dict:
         normalized["linked_pages"] = repair_value(bookmark["linked_pages"])
     if bookmark.get("extracted"):
         normalized["extracted"] = repair_value(bookmark["extracted"])
+    if bookmark.get("extract_failures"):
+        normalized["extract_failures"] = repair_value(bookmark["extract_failures"])
     if bookmark.get("ai"):
         normalized["ai"] = repair_value(bookmark["ai"])
     local = _normalize_local_metadata(repair_value(bookmark.get("local")))
@@ -225,6 +227,8 @@ def _enriched_record(bookmark: dict) -> dict:
         record["linked_pages"] = repair_value(bookmark["linked_pages"])
     if bookmark.get("extracted"):
         record["extracted"] = repair_value(bookmark["extracted"])
+    if bookmark.get("extract_failures"):
+        record["extract_failures"] = repair_value(bookmark["extract_failures"])
     return record
 
 
@@ -259,6 +263,8 @@ def _merge_record(
             merged["linked_pages"] = repair_value(candidate["linked_pages"])
         if candidate.get("extracted"):
             merged["extracted"] = repair_value(candidate["extracted"])
+        if candidate.get("extract_failures"):
+            merged["extract_failures"] = repair_value(candidate["extract_failures"])
         if candidate.get("ai"):
             merged["ai"] = repair_value(candidate["ai"])
         if candidate.get("local") is not None:

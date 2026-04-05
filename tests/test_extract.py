@@ -1,8 +1,11 @@
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import subprocess
 import unittest
 from unittest import mock
 
-from extract import extract_url
+from extract import _normalize_target_url, extract_url, run_extraction
 
 
 class _FakeResponse:
@@ -25,6 +28,10 @@ class _FakeResponse:
 
 
 class ExtractTest(unittest.TestCase):
+    def test_normalize_target_url_rewrites_youtube_live(self) -> None:
+        normalized = _normalize_target_url("https://www.youtube.com/live/z4zXicOAF28?si=abc&t=5106")
+        self.assertEqual(normalized, "https://www.youtube.com/watch?v=z4zXicOAF28")
+
     def test_extract_url_accepts_metadata_only_from_summarize(self) -> None:
         completed = subprocess.CompletedProcess(
             args=["summarize"],
@@ -34,7 +41,7 @@ class ExtractTest(unittest.TestCase):
         )
         with mock.patch("extract.subprocess.run", return_value=completed):
             with mock.patch("extract.urlopen", side_effect=AssertionError("fallback not expected")):
-                result = extract_url("https://youtube.com/playlist?list=abc")
+                result = extract_url("https://example.com/playlist?list=abc")
         self.assertIsNotNone(result)
         self.assertEqual(result["title"], "Playlist title")
         self.assertEqual(result["description"], "Playlist summary")
@@ -75,6 +82,83 @@ class ExtractTest(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["title"], "llms.txt")
         self.assertIn("fallback content", result["content"])
+
+    def test_run_extraction_persists_terminal_failure(self) -> None:
+        payload = {
+            "exportDate": "2026-04-05",
+            "source": "bookmark",
+            "bookmarks": [
+                {
+                    "id": "1",
+                    "author": "A",
+                    "handle": "@a",
+                    "timestamp": "2026-04-05T00:00:00Z",
+                    "text": "Post",
+                    "urls": ["http://api.openai.com"],
+                    "media": [],
+                    "hashtags": [],
+                }
+            ],
+        }
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "bookmarks.json").write_text(json.dumps(payload), encoding="utf-8")
+            with mock.patch("extract.resolve_base_dir", return_value=base):
+                with mock.patch(
+                    "extract._extract_url_with_status",
+                    return_value=(None, {"reason": "unsupported_api_endpoint", "terminal": True, "attempts": 1, "failed_at": "2026-04-05T00:00:00+00:00"}),
+                ):
+                    with mock.patch("extract.time.sleep", return_value=None):
+                        run_extraction()
+            enriched = json.loads((base / "enriched.json").read_text(encoding="utf-8"))
+            bookmark = enriched["bookmarks"][0]
+            self.assertIn("extract_failures", bookmark)
+            self.assertTrue(bookmark["extract_failures"]["http://api.openai.com"]["terminal"])
+
+    def test_run_extraction_skips_cached_terminal_failures(self) -> None:
+        payload = {
+            "exportDate": "2026-04-05",
+            "source": "bookmark",
+            "bookmarks": [
+                {
+                    "id": "1",
+                    "author": "A",
+                    "handle": "@a",
+                    "timestamp": "2026-04-05T00:00:00Z",
+                    "text": "Post",
+                    "urls": ["http://api.openai.com"],
+                    "media": [],
+                    "hashtags": [],
+                }
+            ],
+        }
+        enriched_payload = {
+            **payload,
+            "bookmarks": [
+                {
+                    **payload["bookmarks"][0],
+                    "extract_failures": {
+                        "http://api.openai.com": {
+                            "reason": "unsupported_api_endpoint",
+                            "terminal": True,
+                            "attempts": 2,
+                            "failed_at": "2026-04-05T00:00:00+00:00",
+                        }
+                    },
+                }
+            ],
+        }
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "bookmarks.json").write_text(json.dumps(payload), encoding="utf-8")
+            (base / "enriched.json").write_text(json.dumps(enriched_payload), encoding="utf-8")
+            with mock.patch("extract.resolve_base_dir", return_value=base):
+                with mock.patch("extract._extract_url_with_status", side_effect=AssertionError("cached terminal failure should not retry")):
+                    with mock.patch("extract.time.sleep", return_value=None):
+                        run_extraction()
+            enriched = json.loads((base / "enriched.json").read_text(encoding="utf-8"))
+            bookmark = enriched["bookmarks"][0]
+            self.assertEqual(bookmark["extract_failures"]["http://api.openai.com"]["attempts"], 2)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
 """Phase 1: Extract content from external URLs using summarize CLI."""
 
+from datetime import UTC, datetime
+from functools import lru_cache
 import json
 import re
 import subprocess
@@ -8,7 +10,7 @@ import time
 from html import unescape
 from html.parser import HTMLParser
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 from bookmark_paths import resolve_base_dir
@@ -20,6 +22,10 @@ FALLBACK_FETCH_BYTES = 512_000
 FALLBACK_TIMEOUT_SECONDS = 15
 
 SKIP_DOMAINS = {"x.com", "twitter.com", "t.co"}
+SHORTLINK_DOMAINS = {"bloom.bg", "buff.ly", "ow.ly"}
+TERMINAL_DOMAINS = {"api.openai.com"}
+DROP_QUERY_PARAMS = {"ab_channel", "fbclid", "feature", "g_st", "mc_cid", "mc_eid", "si", "utm_campaign", "utm_content", "utm_medium", "utm_source", "utm_term"}
+USER_AGENT = "Mozilla/5.0 (compatible; x-bookmarks/0.1; +https://github.com/YogevKr/x-bookmarks)"
 
 
 def should_extract(url: str) -> bool:
@@ -43,7 +49,7 @@ def _preview_text(text: str, limit: int = 320) -> str:
 
 
 def _normalize_page(page: dict, *, fallback_url: str | None = None) -> dict:
-    return {
+    normalized = {
         "url": str(page.get("url") or fallback_url or ""),
         "title": str(page.get("title", "")),
         "description": str(page.get("description", "")),
@@ -52,6 +58,10 @@ def _normalize_page(page: dict, *, fallback_url: str | None = None) -> dict:
         "word_count": int(page.get("word_count", 0) or 0),
         "site_name": str(page.get("site_name", "")),
     }
+    resolved_url = str(page.get("resolved_url", "")).strip()
+    if resolved_url:
+        normalized["resolved_url"] = resolved_url
+    return normalized
 
 
 def _has_link_payload(page: dict | None) -> bool:
@@ -61,7 +71,7 @@ def _has_link_payload(page: dict | None) -> bool:
 
 
 def _primary_extracted(page: dict) -> dict:
-    return {
+    payload = {
         "url": page.get("url", ""),
         "title": page.get("title", ""),
         "description": page.get("description", ""),
@@ -70,6 +80,133 @@ def _primary_extracted(page: dict) -> dict:
         "word_count": page.get("word_count", 0),
         "site_name": page.get("site_name", ""),
     }
+    if page.get("resolved_url"):
+        payload["resolved_url"] = page.get("resolved_url", "")
+    return payload
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat()
+
+
+def _domain(url: str) -> str:
+    return urlparse(url).netloc.replace("www.", "").lower()
+
+
+def _request_headers(*, accept: str = "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8") -> dict[str, str]:
+    return {
+        "User-Agent": USER_AGENT,
+        "Accept": accept,
+    }
+
+
+def _normalize_target_url(url: str) -> str:
+    parsed = urlparse(url.strip())
+    if not parsed.scheme:
+        parsed = urlparse(f"https://{url.strip()}")
+
+    scheme = parsed.scheme.lower() or "https"
+    domain = parsed.netloc.lower()
+    path = parsed.path or "/"
+    query_pairs = list(parse_qsl(parsed.query, keep_blank_values=True))
+
+    def keep_param(key: str) -> bool:
+        if key in DROP_QUERY_PARAMS:
+            return False
+        if key.startswith("utm_"):
+            return False
+        return True
+
+    if domain == "youtu.be":
+        video_id = path.strip("/").split("/", 1)[0]
+        if video_id:
+            domain = "www.youtube.com"
+            path = "/watch"
+            query_pairs = [("v", video_id)]
+
+    if domain in {"youtube.com", "www.youtube.com", "m.youtube.com"}:
+        if path.startswith("/live/") or path.startswith("/shorts/"):
+            video_id = path.strip("/").split("/", 1)[1] if "/" in path.strip("/") else ""
+            if video_id:
+                path = "/watch"
+                query_pairs = [("v", video_id)]
+        elif path == "/watch":
+            query_pairs = [(key, value) for key, value in query_pairs if key in {"v", "list"}]
+
+    query_pairs = [(key, value) for key, value in query_pairs if keep_param(key)]
+    return urlunparse((scheme, domain, path, "", urlencode(query_pairs, doseq=True), ""))
+
+
+@lru_cache(maxsize=512)
+def _resolve_shortlink_target(url: str) -> str:
+    parsed = urlparse(url)
+    domain = parsed.netloc.replace("www.", "").lower()
+    if domain not in SHORTLINK_DOMAINS and not (domain == "blog.openai.com" and parsed.path.startswith("/p/")):
+        return url
+
+    request = Request(url, headers=_request_headers())
+    try:
+        with urlopen(request, timeout=FALLBACK_TIMEOUT_SECONDS) as response:
+            final_url = str(response.geturl() or url)
+    except (HTTPError, URLError, TimeoutError, ValueError):
+        return url
+    return _normalize_target_url(final_url)
+
+
+def _prepare_target_url(url: str) -> tuple[str, str]:
+    normalized = _normalize_target_url(url)
+    resolved = _resolve_shortlink_target(normalized)
+    return normalized, resolved
+
+
+def _failure_record(
+    url: str,
+    *,
+    reason: str,
+    terminal: bool,
+    normalized_url: str | None = None,
+    resolved_url: str | None = None,
+    previous: dict | None = None,
+) -> dict:
+    attempts = 1
+    if isinstance(previous, dict):
+        previous_attempts = previous.get("attempts")
+        if isinstance(previous_attempts, int) and previous_attempts > 0:
+            attempts = previous_attempts + 1
+    payload = {
+        "reason": reason,
+        "terminal": terminal,
+        "failed_at": _now_iso(),
+        "attempts": attempts,
+    }
+    if normalized_url and normalized_url != url:
+        payload["normalized_url"] = normalized_url
+    if resolved_url and resolved_url not in {url, normalized_url or ""}:
+        payload["resolved_url"] = resolved_url
+    return payload
+
+
+def _normalize_failure_map(value: dict | None) -> dict[str, dict]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, dict] = {}
+    for url, metadata in value.items():
+        clean_url = str(url).strip()
+        if not clean_url:
+            continue
+        if isinstance(metadata, dict):
+            normalized[clean_url] = {
+                "reason": str(metadata.get("reason", "extract_failed")),
+                "terminal": bool(metadata.get("terminal")),
+                "failed_at": str(metadata.get("failed_at") or _now_iso()),
+                "attempts": int(metadata.get("attempts", 1) or 1),
+            }
+            for key in ("normalized_url", "resolved_url"):
+                if metadata.get(key):
+                    normalized[clean_url][key] = str(metadata[key])
+            continue
+        normalized[clean_url] = _failure_record(clean_url, reason=str(metadata or "extract_failed"), terminal=False)
+    return normalized
 
 
 def _existing_link_pages(bookmark: dict) -> list[dict]:
@@ -82,6 +219,10 @@ def _existing_link_pages(bookmark: dict) -> list[dict]:
     urls = [url for url in bookmark.get("urls", []) if should_extract(url)]
     fallback_url = extracted.get("url") or (urls[0] if urls else None)
     return [_normalize_page(extracted, fallback_url=fallback_url)]
+
+
+def _existing_failures(bookmark: dict) -> dict[str, dict]:
+    return _normalize_failure_map(repair_value(bookmark.get("extract_failures")))
 
 
 def _dedupe_pages(pages: list[dict]) -> list[dict]:
@@ -179,13 +320,36 @@ def _normalize_summarize_payload(url: str, ext: dict) -> dict | None:
     return page if _has_link_payload(page) else None
 
 
+def _extract_youtube_metadata(url: str) -> dict | None:
+    if _domain(url) not in {"youtube.com", "youtu.be"}:
+        return None
+    oembed_url = f"https://www.youtube.com/oembed?url={quote(url, safe='')}&format=json"
+    request = Request(oembed_url, headers=_request_headers(accept="application/json,text/plain;q=0.9,*/*;q=0.8"))
+    try:
+        with urlopen(request, timeout=FALLBACK_TIMEOUT_SECONDS) as response:
+            data = json.loads(response.read().decode("utf-8", errors="ignore"))
+    except (HTTPError, URLError, TimeoutError, ValueError, json.JSONDecodeError):
+        return None
+    title = str(data.get("title", "")).strip()
+    author = str(data.get("author_name", "")).strip()
+    description = f"by {author}" if author else ""
+    content = " ".join(part for part in (title, author) if part)
+    page = {
+        "url": url,
+        "title": title,
+        "description": description,
+        "content": content,
+        "preview": _preview_text(content or title or description),
+        "word_count": len(content.split()),
+        "site_name": "YouTube",
+    }
+    return page if _has_link_payload(page) else None
+
+
 def _fallback_extract_url(url: str) -> dict | None:
     request = Request(
         url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (compatible; x-bookmarks/0.1; +https://github.com/YogevKr/x-bookmarks)",
-            "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
-        },
+        headers=_request_headers(),
     )
     try:
         with urlopen(request, timeout=FALLBACK_TIMEOUT_SECONDS) as response:
@@ -218,7 +382,7 @@ def _fallback_extract_url(url: str) -> dict | None:
     parser.feed(text)
     parser.close()
     page = {
-        "url": final_url,
+        "url": url,
         "title": parser.title,
         "description": parser.description,
         "content": parser.text,
@@ -226,6 +390,8 @@ def _fallback_extract_url(url: str) -> dict | None:
         "word_count": len(parser.text.split()),
         "site_name": parser.site_name or urlparse(final_url).netloc.replace("www.", ""),
     }
+    if final_url != url:
+        page["resolved_url"] = final_url
     return page if _has_link_payload(page) else None
 
 
@@ -249,27 +415,94 @@ def _merge_extracted(primary: dict | None, fallback: dict | None) -> dict | None
     return None
 
 
-def extract_url(url: str) -> dict | None:
-    """Run summarize --extract --json on a single URL. Returns extracted dict or None."""
+def _extract_url_with_status(url: str) -> tuple[dict | None, dict | None]:
+    normalized_url, target_url = _prepare_target_url(url)
+
+    if _domain(target_url) in TERMINAL_DOMAINS:
+        return None, _failure_record(
+            url,
+            reason="unsupported_api_endpoint",
+            terminal=True,
+            normalized_url=normalized_url,
+            resolved_url=target_url,
+        )
+
+    youtube = _extract_youtube_metadata(target_url)
+    if youtube:
+        if target_url != url:
+            youtube["resolved_url"] = target_url
+        youtube["url"] = url
+        return youtube, None
+
     summarized: dict | None = None
+    summarize_timed_out = False
     try:
         result = subprocess.run(
             [
                 "summarize", "--extract", "--json", "--plain",
                 "--max-extract-characters", str(MAX_EXTRACT_CHARS),
-                url,
+                target_url,
             ],
             capture_output=True, text=True, timeout=60,
         )
         if result.returncode == 0:
-            data = json.loads(result.stdout)
-            summarized = _normalize_summarize_payload(url, data.get("extracted", {}))
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception) as e:
-        print(f"  FAIL: {url[:60]} — {e}", file=sys.stderr)
-    if summarized and (str(summarized.get("content", "")).strip() or str(summarized.get("description", "")).strip()):
-        return summarized
-    fallback = _fallback_extract_url(url)
-    return _merge_extracted(summarized, fallback)
+            summarized = _normalize_summarize_payload(target_url, data := json.loads(result.stdout).get("extracted", {}))
+            if summarized and target_url != url:
+                summarized["resolved_url"] = target_url
+                summarized["url"] = url
+            if summarized and (str(summarized.get("content", "")).strip() or str(summarized.get("description", "")).strip()):
+                return summarized, None
+            if data.get("title") or data.get("description"):
+                summarized = summarized or _normalize_summarize_payload(target_url, data)
+                if summarized and target_url != url:
+                    summarized["resolved_url"] = target_url
+                    summarized["url"] = url
+        else:
+            summarized = None
+    except subprocess.TimeoutExpired as error:
+        print(f"  FAIL: {url[:60]} — {error}", file=sys.stderr)
+        summarize_timed_out = True
+    except (json.JSONDecodeError, Exception) as error:
+        print(f"  FAIL: {url[:60]} — {error}", file=sys.stderr)
+
+    fallback = _fallback_extract_url(target_url)
+    if fallback and target_url != url:
+        fallback["resolved_url"] = fallback.get("resolved_url") or target_url
+        fallback["url"] = url
+    merged = _merge_extracted(summarized, fallback)
+    if merged:
+        return merged, None
+
+    if summarized:
+        return summarized, None
+
+    domain = _domain(target_url)
+    reason = "extract_failed"
+    terminal = True
+    if summarize_timed_out:
+        reason = "summarize_timeout"
+        terminal = False
+    elif domain in SHORTLINK_DOMAINS:
+        reason = "shortlink_unresolved"
+    elif target_url.endswith("/llms.txt"):
+        reason = "llmstxt_unavailable"
+    elif domain in {"youtube.com", "youtu.be"}:
+        reason = "youtube_metadata_unavailable"
+    elif domain in {"drive.google.com"}:
+        reason = "drive_file_unavailable"
+    return None, _failure_record(
+        url,
+        reason=reason,
+        terminal=terminal,
+        normalized_url=normalized_url,
+        resolved_url=target_url,
+    )
+
+
+def extract_url(url: str) -> dict | None:
+    """Run summarize --extract --json on a single URL. Returns extracted dict or None."""
+    extracted, _failure = _extract_url_with_status(url)
+    return extracted
 
 
 def run_extraction(
@@ -294,16 +527,20 @@ def run_extraction(
             existing = repair_value(json.load(f))
         for bm in existing["bookmarks"]:
             pages = _existing_link_pages(bm)
-            if pages:
-                enriched_map[bm["id"]] = {
-                    "linked_pages": pages,
-                    "extracted": _primary_extracted(pages[0]),
-                }
+            failures = _existing_failures(bm)
+            if pages or failures:
+                enriched_map[bm["id"]] = {}
+                if pages:
+                    enriched_map[bm["id"]]["linked_pages"] = pages
+                    enriched_map[bm["id"]]["extracted"] = _primary_extracted(pages[0])
+                if failures:
+                    enriched_map[bm["id"]]["extract_failures"] = failures
         if not force and not bookmark_id:
             print(f"Resuming: {len(enriched_map)} already extracted")
 
     # Collect URLs to extract
     todo = []
+    skipped_terminal = 0
     for bm in bookmarks:
         if bookmark_id and bm["id"] != bookmark_id:
             continue
@@ -311,15 +548,25 @@ def run_extraction(
         if urls:
             existing = enriched_map.get(bm["id"], {})
             existing_pages = existing.get("linked_pages", [])
+            existing_failures = existing.get("extract_failures", {})
             covered = {page.get("url") for page in existing_pages}
-            needs_upgrade = force or any(url not in covered for url in urls)
-            if needs_upgrade:
-                todo.append((bm["id"], urls))
+            pending_urls = []
+            for url in urls:
+                if not force and url in covered:
+                    continue
+                if not force and existing_failures.get(url, {}).get("terminal"):
+                    skipped_terminal += 1
+                    continue
+                pending_urls.append(url)
+            if force or pending_urls:
+                todo.append((bm["id"], pending_urls if pending_urls else urls))
 
     if limit is not None:
         todo = todo[:limit]
 
     print(f"Extracting content from {len(todo)} bookmarks ({sum(len(u) for _, u in todo)} URLs)...")
+    if skipped_terminal and not force:
+        print(f"Skipping {skipped_terminal} terminal failures cached from prior runs")
 
     extracted_count = 0
     extracted_pages = 0
@@ -327,32 +574,41 @@ def run_extraction(
 
     for i, (bm_id, urls) in enumerate(todo):
         existing_pages = [] if force else list(enriched_map.get(bm_id, {}).get("linked_pages", []))
+        failure_map = {} if force else dict(enriched_map.get(bm_id, {}).get("extract_failures", {}))
         covered = {page.get("url") for page in existing_pages}
         results = list(existing_pages)
         bookmark_had_success = False
+        bookmark_had_failure = False
         for url in urls:
             if not force and url in covered:
                 continue
+            if not force and failure_map.get(url, {}).get("terminal"):
+                continue
             print(f"  [{i+1}/{len(todo)}] {url[:70]}...", end=" ", flush=True)
-            result = extract_url(url)
+            result, failure = _extract_url_with_status(url)
             if result:
                 print(f"OK ({result['word_count']}w)")
                 results.append(_normalize_page(result))
                 covered.add(url)
                 bookmark_had_success = True
                 extracted_pages += 1
+                failure_map.pop(url, None)
             else:
                 print("skip")
+                bookmark_had_failure = True
+                failure_map[url] = failure or _failure_record(url, reason="extract_failed", terminal=False, previous=failure_map.get(url))
 
         results = _dedupe_pages(results)
-        if results:
-            enriched_map[bm_id] = {
-                "linked_pages": results,
-                "extracted": _primary_extracted(results[0]),
-            }
+        if results or failure_map:
+            enriched_map[bm_id] = {}
+            if results:
+                enriched_map[bm_id]["linked_pages"] = results
+                enriched_map[bm_id]["extracted"] = _primary_extracted(results[0])
+            if failure_map:
+                enriched_map[bm_id]["extract_failures"] = failure_map
         if bookmark_had_success:
             extracted_count += 1
-        elif not results:
+        elif bookmark_had_failure and not results:
             failed_count += 1
 
         # Save progress every 20 bookmarks
@@ -374,8 +630,12 @@ def _save_enriched(data: dict, bookmarks: list, enriched_map: dict, output_file)
     for bm in bookmarks:
         enriched = {**bm}
         if bm["id"] in enriched_map:
-            enriched["extracted"] = enriched_map[bm["id"]]["extracted"]
-            enriched["linked_pages"] = enriched_map[bm["id"]]["linked_pages"]
+            if enriched_map[bm["id"]].get("extracted"):
+                enriched["extracted"] = enriched_map[bm["id"]]["extracted"]
+            if enriched_map[bm["id"]].get("linked_pages"):
+                enriched["linked_pages"] = enriched_map[bm["id"]]["linked_pages"]
+            if enriched_map[bm["id"]].get("extract_failures"):
+                enriched["extract_failures"] = enriched_map[bm["id"]]["extract_failures"]
         enriched_bookmarks.append(enriched)
 
     output = {**data, "bookmarks": enriched_bookmarks}
