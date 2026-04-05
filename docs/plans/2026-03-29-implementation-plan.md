@@ -23,7 +23,7 @@
 **Step 1: Initialize uv project**
 
 ```bash
-cd /Users/yogev/sandbox/x-bookmarks
+cd /path/to/x-bookmarks
 uv init --no-readme --python 3.14
 ```
 

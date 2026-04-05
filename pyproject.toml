@@ -2,10 +2,16 @@
 name = "x-bookmarks"
 version = "0.1.0"
 description = "Shell-friendly X bookmarks pipeline and query CLI"
+license = { file = "LICENSE" }
+readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "anthropic>=0.86.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/YogevKr/x-bookmarks"
+Documentation = "https://github.com/YogevKr/x-bookmarks/blob/main/docs/cli.md"
 
 [project.scripts]
 x-bookmarks = "main:main"
