@@ -19,15 +19,16 @@ from bookmark_query import (
     render_viz,
     search_bookmarks,
     show_bookmark,
+    show_deleted_bookmark,
     bookmark_context,
 )
 
 
-def cmd_extract(_args: argparse.Namespace) -> None:
+def cmd_extract(args: argparse.Namespace) -> None:
     print("Phase 1: Content extraction")
     from extract import run_extraction
 
-    run_extraction()
+    run_extraction(force=args.force, limit=args.limit, bookmark_id=args.bookmark_id)
     refresh_index()
 
 
@@ -71,18 +72,99 @@ def cmd_sync(args: argparse.Namespace) -> None:
     print(f"Source of truth: {result['source_of_truth']}")
     print(
         f"Bookmarks: {result['bookmarks']['previous']} -> {result['bookmarks']['current']} "
-        f"(removed {result['bookmarks']['removed']})"
+        f"(removed {result['bookmarks']['removed']}, tombstoned {result['bookmarks']['tombstoned']})"
     )
     print(
-        "Derived: "
-        f"enriched retained_extracted={result['derived']['enriched']['retained_extracted']} · "
-        f"categorized retained_ai={result['derived']['categorized']['retained_ai']}"
+        "Bidirectional: "
+        f"detected_deletes={result['bidirectional']['detected_deletes']} · "
+        f"restored={result['bidirectional']['restored']}"
     )
     print(f"Index: {result['index']['doc_count']} docs @ {result['index']['index_db']}")
 
 
+def cmd_remove(args: argparse.Namespace) -> None:
+    from bookmark_sync import remove_bookmarks
+
+    result = remove_bookmarks(args.ids)
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    print(
+        f"Removed: {', '.join(result['mutation']['removed']) or 'none'} "
+        f"(missing: {', '.join(result['mutation']['missing']) or 'none'})"
+    )
+    print(f"Bookmarks: {result['bookmarks']['current']} active")
+
+
+def cmd_restore(args: argparse.Namespace) -> None:
+    from bookmark_sync import restore_bookmarks
+
+    ids = [] if args.all else args.ids
+    result = restore_bookmarks(ids)
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    print(
+        f"Restored: {', '.join(result['mutation']['restored']) or 'none'} "
+        f"(missing archive: {', '.join(result['mutation']['missing']) or 'none'})"
+    )
+    print(f"Bookmarks: {result['bookmarks']['current']} active")
+
+
 def _auto_refresh(args: argparse.Namespace) -> bool:
     return not getattr(args, "no_refresh", False)
+
+
+def _extract_link_context_from_urls(urls: list[str]) -> dict | None:
+    from extract import extract_url
+
+    for url in urls:
+        extracted = extract_url(url)
+        if extracted:
+            return {"url": url, **extracted}
+    return None
+
+
+def _augment_result_with_link_context(result: dict | None, *, fetch_link: bool = False) -> dict | None:
+    if not result:
+        return None
+
+    output = dict(result)
+    linked_url = (output.get("external_urls") or [None])[0]
+    output["linked_url"] = linked_url
+
+    has_stored_link = any(output.get(field) for field in ("linked_title", "linked_description", "linked_preview"))
+    if has_stored_link:
+        output["linked_source"] = "stored"
+        return output
+
+    if not linked_url:
+        output["linked_source"] = "none"
+        return output
+
+    if not fetch_link:
+        output["linked_source"] = "available"
+        return output
+
+    extracted = _extract_link_context_from_urls(output.get("external_urls") or [])
+    if not extracted:
+        output["linked_source"] = "fetch_failed"
+        return output
+
+    output["linked_title"] = extracted.get("title", "")
+    output["linked_description"] = extracted.get("description", "")
+    output["linked_preview"] = extracted.get("content", "")
+    output["linked_source"] = "fetched"
+    output["linked_url"] = extracted.get("url", linked_url)
+    return output
+
+
+def _augment_context_with_link_context(result: dict | None, *, fetch_link: bool = False) -> dict | None:
+    if not result:
+        return None
+    output = dict(result)
+    output["bookmark"] = _augment_result_with_link_context(output["bookmark"], fetch_link=fetch_link)
+    return output
 
 
 def cmd_status(args: argparse.Namespace) -> None:
@@ -97,6 +179,12 @@ def cmd_status(args: argparse.Namespace) -> None:
     print(f"Doc count: source={status['doc_count']} indexed={status['indexed_count']}")
     print(f"Built at: {status['built_at']}")
     print(f"Base source: {status['source_state']['base']}")
+    print(
+        "Sync state: "
+        f"tombstones={status['sync_state']['tombstone_count']} · "
+        f"archive={status['sync_state']['archive_count']} · "
+        f"updated_at={status['sync_state']['updated_at']}"
+    )
     if status["reasons"]:
         print("Reasons:")
         for reason in status["reasons"]:
@@ -148,6 +236,7 @@ def cmd_list(args: argparse.Namespace) -> None:
         limit=args.limit,
         offset=args.offset,
         sort=args.sort,
+        deleted=args.deleted,
         auto_refresh=_auto_refresh(args),
     )
     if args.json:
@@ -157,7 +246,8 @@ def cmd_list(args: argparse.Namespace) -> None:
 
 
 def cmd_show(args: argparse.Namespace) -> None:
-    result = show_bookmark(args.id, auto_refresh=_auto_refresh(args))
+    result = show_deleted_bookmark(args.id) if args.deleted else show_bookmark(args.id, auto_refresh=_auto_refresh(args))
+    result = _augment_result_with_link_context(result, fetch_link=args.fetch_link)
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return
@@ -166,6 +256,7 @@ def cmd_show(args: argparse.Namespace) -> None:
 
 def cmd_context(args: argparse.Namespace) -> None:
     result = bookmark_context(args.id, limit=args.limit, auto_refresh=_auto_refresh(args))
+    result = _augment_context_with_link_context(result, fetch_link=args.fetch_link)
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return
@@ -242,7 +333,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="X Bookmarks pipeline, persistent index, and agent CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("extract", help="Phase 1: Extract content from URLs")
+    extract_parser = sub.add_parser("extract", help="Phase 1: Extract content from URLs")
+    extract_parser.add_argument("--force", action="store_true", help="Re-extract bookmarks even if link content already exists")
+    extract_parser.add_argument("--limit", type=int, help="Only process the first N matching bookmarks")
+    extract_parser.add_argument("--bookmark-id", help="Only extract links for a specific bookmark id")
 
     cat_parser = sub.add_parser("categorize", help="Phase 2: categorize bookmarks")
     cat_parser.add_argument("--force", action="store_true", help="Re-categorize all bookmarks")
@@ -261,6 +355,15 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument("--categorize", action="store_true", help="Run Claude categorization after sync")
     sync_parser.add_argument("--regex", action="store_true", help="Run regex categorization after sync")
     sync_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    remove_parser = sub.add_parser("remove", help="Remove bookmarks locally and propagate to all synced files")
+    remove_parser.add_argument("ids", nargs="+", help="Bookmark ids")
+    remove_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    restore_parser = sub.add_parser("restore", help="Restore locally removed bookmarks from sync archive")
+    restore_parser.add_argument("ids", nargs="*", help="Bookmark ids")
+    restore_parser.add_argument("--all", action="store_true", help="Restore all tombstoned bookmarks")
+    restore_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
     status_parser = sub.add_parser("status", help="Show index freshness and source drift")
     status_parser.add_argument("--json", action="store_true", help="Emit JSON")
@@ -295,17 +398,21 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser.add_argument("--sort", choices=["date", "relevance"], default="date", help="Sort order")
     list_parser.add_argument("--limit", type=int, default=30, help="Max results")
     list_parser.add_argument("--offset", type=int, default=0, help="Offset into the result set")
+    list_parser.add_argument("--deleted", action="store_true", help="List locally deleted bookmarks from sync archive")
     list_parser.add_argument("--json", action="store_true", help="Emit JSON")
     list_parser.add_argument("--no-refresh", action="store_true", help="Do not auto-refresh a stale index")
 
     show_parser = sub.add_parser("show", help="Show a bookmark in detail")
     show_parser.add_argument("id", help="Bookmark id")
+    show_parser.add_argument("--deleted", action="store_true", help="Show a locally deleted bookmark from the sync archive")
+    show_parser.add_argument("--fetch-link", action="store_true", help="Extract linked page content on demand if it is not already stored")
     show_parser.add_argument("--json", action="store_true", help="Emit JSON")
     show_parser.add_argument("--no-refresh", action="store_true", help="Do not auto-refresh a stale index")
 
     context_parser = sub.add_parser("context", help="360-degree bookmark context")
     context_parser.add_argument("id", help="Bookmark id")
     context_parser.add_argument("--limit", type=int, default=5, help="Related results per section")
+    context_parser.add_argument("--fetch-link", action="store_true", help="Extract linked page content for the anchor bookmark if it is not already stored")
     context_parser.add_argument("--json", action="store_true", help="Emit JSON")
     context_parser.add_argument("--no-refresh", action="store_true", help="Do not auto-refresh a stale index")
 
@@ -345,6 +452,8 @@ def main(argv: list[str] | None = None) -> None:
         "normalize": cmd_normalize,
         "all": cmd_all,
         "sync": cmd_sync,
+        "remove": cmd_remove,
+        "restore": cmd_restore,
         "status": cmd_status,
         "refresh": cmd_refresh,
         "search": cmd_search,

@@ -181,14 +181,25 @@ def build_bookmark_text(bookmark: dict) -> str:
     """Build input text for a single bookmark."""
     handle = bookmark["handle"] if bookmark["handle"].startswith("@") else f"@{bookmark['handle']}"
     parts = [f"{handle}: {bookmark['text'][:500]}"]
-    extracted = bookmark.get("extracted", {})
-    if extracted:
-        content = extracted.get("content", "")
-        title = extracted.get("title", "")
+    link_pages = bookmark.get("linked_pages", [])
+    if not link_pages and bookmark.get("extracted"):
+        link_pages = [bookmark["extracted"]]
+    for page in link_pages[:2]:
+        title = str(page.get("title", "")).strip()
+        description = str(page.get("description", "")).strip()
+        preview = str(page.get("preview", "")).strip()
+        content = str(page.get("content", "")).strip()
+        url = str(page.get("url", "")).strip()
         if title:
             parts.append(f"Linked: {title}")
-        if content:
+        if description and description.casefold() != title.casefold():
+            parts.append(description[:300])
+        if preview and preview.casefold() not in {title.casefold(), description.casefold()}:
+            parts.append(preview[:MAX_CONTENT_PER_BOOKMARK])
+        elif content:
             parts.append(content[:MAX_CONTENT_PER_BOOKMARK])
+        if url:
+            parts.append(f"Link URL: {url}")
     if bookmark.get("urls"):
         parts.append("URLs: " + ", ".join(bookmark["urls"][:3]))
     return "\n".join(parts)
@@ -219,12 +230,24 @@ def categorize_batch(client: anthropic.Anthropic, batch: list[dict]) -> list[dic
 
 
 def _combined_text(bookmark: dict) -> str:
-    extracted = bookmark.get("extracted", {})
+    link_pages = bookmark.get("linked_pages", [])
+    if not link_pages and bookmark.get("extracted"):
+        link_pages = [bookmark["extracted"]]
+    extracted_parts = []
+    for page in link_pages:
+        extracted_parts.extend(
+            [
+                str(page.get("title", "")),
+                str(page.get("description", "")),
+                str(page.get("preview", "")),
+                str(page.get("content", ""))[:1200],
+                str(page.get("site_name", "")),
+                str(page.get("url", "")),
+            ]
+        )
     parts = [
         str(bookmark.get("text", "")),
-        str(extracted.get("title", "")),
-        str(extracted.get("description", "")),
-        str(extracted.get("content", ""))[:1200],
+        *[part for part in extracted_parts if part],
         " ".join(bookmark.get("hashtags", [])),
         " ".join(bookmark.get("urls", [])),
     ]

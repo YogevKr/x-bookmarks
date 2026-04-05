@@ -8,13 +8,18 @@ from bookmark_query import (
     bookmark_context,
     collect_stats,
     domain_counts,
+    format_context_result,
+    format_search_results,
+    format_show_result,
     get_index_status,
     list_bookmarks,
     refresh_index,
     render_viz,
     search_bookmarks,
     show_bookmark,
+    show_deleted_bookmark,
 )
+from bookmark_sync import remove_bookmarks, sync_bookmarks
 
 
 BOOKMARKS = {
@@ -25,7 +30,10 @@ BOOKMARKS = {
             "author": "OpenTelemetry",
             "text": "Observability with OpenTelemetry in Python",
             "timestamp": "Thu Jan 01 12:00:00 +0000 2026",
-            "urls": ["https://opentelemetry.io/docs/languages/python/"],
+            "urls": [
+                "https://opentelemetry.io/docs/languages/python/",
+                "https://example.com/otel-deep-dive",
+            ],
             "hashtags": ["observability"],
             "media": [],
         },
@@ -60,13 +68,39 @@ ENRICHED = {
             "author": "OpenTelemetry",
             "text": "Observability with OpenTelemetry in Python",
             "timestamp": "Thu Jan 01 12:00:00 +0000 2026",
-            "urls": ["https://opentelemetry.io/docs/languages/python/"],
+            "urls": [
+                "https://opentelemetry.io/docs/languages/python/",
+                "https://example.com/otel-deep-dive",
+            ],
             "hashtags": ["observability"],
             "media": [],
+            "linked_pages": [
+                {
+                    "url": "https://opentelemetry.io/docs/languages/python/",
+                    "title": "Python instrumentation",
+                    "description": "Tracing and metrics with OpenTelemetry",
+                    "content": "Observability pipelines rely on traces, metrics, and logs.",
+                    "preview": "Observability pipelines rely on traces, metrics, and logs.",
+                    "site_name": "OpenTelemetry",
+                    "word_count": 12,
+                },
+                {
+                    "url": "https://example.com/otel-deep-dive",
+                    "title": "Advanced telemetry deep dive",
+                    "description": "Production OpenTelemetry patterns",
+                    "content": "Deep dive into production-grade telemetry pipelines and collector tuning.",
+                    "preview": "Deep dive into production-grade telemetry pipelines and collector tuning.",
+                    "site_name": "Example",
+                    "word_count": 11,
+                },
+            ],
             "extracted": {
                 "title": "Python instrumentation",
                 "description": "Tracing and metrics with OpenTelemetry",
                 "content": "Observability pipelines rely on traces, metrics, and logs.",
+                "preview": "Observability pipelines rely on traces, metrics, and logs.",
+                "url": "https://opentelemetry.io/docs/languages/python/",
+                "site_name": "OpenTelemetry",
             },
         },
         BOOKMARKS["bookmarks"][1],
@@ -132,12 +166,17 @@ class BookmarkIndexTest(unittest.TestCase):
         self.assertTrue(result["fresh"])
         status = get_index_status(paths=self.paths)
         self.assertTrue(status["fresh"])
+        self.assertIn("sync_state", status)
 
     def test_search_bookmarks_hybrid(self) -> None:
         results = search_bookmarks("observability", limit=5, paths=self.paths)
         self.assertIsInstance(results, list)
         self.assertEqual(results[0]["id"], "1")
         self.assertIn("bm25#1", results[0]["why"])
+
+    def test_search_matches_secondary_link_content(self) -> None:
+        results = search_bookmarks("collector tuning", limit=5, paths=self.paths)
+        self.assertEqual(results[0]["id"], "1")
 
     def test_grouped_search(self) -> None:
         results = search_bookmarks("ai", limit=5, group_by="category", paths=self.paths)
@@ -150,11 +189,33 @@ class BookmarkIndexTest(unittest.TestCase):
 
     def test_show_and_context(self) -> None:
         refresh_index(paths=self.paths)
-        shown = show_bookmark("2", paths=self.paths)
-        self.assertEqual(shown["id"], "2")
-        context = bookmark_context("2", paths=self.paths)
-        self.assertEqual(context["bookmark"]["id"], "2")
+        shown = show_bookmark("1", paths=self.paths)
+        self.assertEqual(shown["id"], "1")
+        self.assertEqual(shown["linked_title"], "Python instrumentation")
+        self.assertIn("Observability pipelines rely on traces", shown["linked_preview"])
+        self.assertEqual(len(shown["link_pages"]), 2)
+        context = bookmark_context("1", paths=self.paths)
+        self.assertEqual(context["bookmark"]["id"], "1")
         self.assertIn("similar", context)
+
+    def test_formatters_include_context_previews(self) -> None:
+        refresh_index(paths=self.paths)
+        results = search_bookmarks("observability", limit=5, paths=self.paths)
+        output = format_search_results(results)
+        self.assertIn("tweet:", output)
+        self.assertIn("link:", output)
+
+        shown = show_bookmark("1", paths=self.paths)
+        show_output = format_show_result(shown)
+        self.assertIn("linked", show_output)
+        self.assertIn("Python instrumentation", show_output)
+        self.assertIn("other links", show_output)
+        self.assertIn("Advanced telemetry deep dive", show_output)
+
+        context = bookmark_context("1", paths=self.paths)
+        context_output = format_context_result(context)
+        self.assertIn("linked", context_output)
+        self.assertIn("Observability with OpenTelemetry in Python", context_output)
 
     def test_collect_stats_and_domains(self) -> None:
         refresh_index(paths=self.paths)
@@ -178,6 +239,21 @@ class BookmarkIndexTest(unittest.TestCase):
         status = get_index_status(paths=self.paths)
         self.assertTrue(status["stale"])
         self.assertIn("source_files_changed", status["reasons"])
+
+    def test_deleted_list_and_show(self) -> None:
+        sync_bookmarks(reconcile_only=True, paths=self.paths)
+        remove_bookmarks(["2"], paths=self.paths)
+
+        deleted = list_bookmarks(deleted=True, paths=self.paths)
+        self.assertEqual([item["id"] for item in deleted], ["2"])
+        self.assertTrue(deleted[0]["deleted"])
+        self.assertEqual(deleted[0]["deletion_source"], "cli:remove")
+
+        shown = show_deleted_bookmark("2", paths=self.paths)
+        self.assertIsNotNone(shown)
+        assert shown is not None
+        self.assertTrue(shown["deleted"])
+        self.assertEqual(shown["id"], "2")
 
 
 if __name__ == "__main__":

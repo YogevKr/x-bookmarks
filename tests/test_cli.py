@@ -1,6 +1,7 @@
 import unittest
+from unittest import mock
 
-from cli import build_parser
+from cli import _augment_result_with_link_context, build_parser
 
 
 class CliSurfaceTest(unittest.TestCase):
@@ -19,6 +20,56 @@ class CliSurfaceTest(unittest.TestCase):
         args = parser.parse_args(["sync", "--reconcile-only", "--json"])
         self.assertTrue(args.reconcile_only)
         self.assertTrue(args.json)
+
+    def test_remove_and_restore_parse_ids(self) -> None:
+        parser = build_parser()
+        remove_args = parser.parse_args(["remove", "123", "456", "--json"])
+        restore_args = parser.parse_args(["restore", "123"])
+        restore_all_args = parser.parse_args(["restore", "--all"])
+        self.assertEqual(remove_args.ids, ["123", "456"])
+        self.assertTrue(remove_args.json)
+        self.assertEqual(restore_args.ids, ["123"])
+        self.assertTrue(restore_all_args.all)
+
+    def test_show_and_list_parse_deleted(self) -> None:
+        parser = build_parser()
+        show_args = parser.parse_args(["show", "123", "--deleted"])
+        list_args = parser.parse_args(["list", "--deleted"])
+        self.assertTrue(show_args.deleted)
+        self.assertTrue(list_args.deleted)
+
+    def test_show_and_context_parse_fetch_link(self) -> None:
+        parser = build_parser()
+        show_args = parser.parse_args(["show", "123", "--fetch-link"])
+        context_args = parser.parse_args(["context", "123", "--fetch-link"])
+        self.assertTrue(show_args.fetch_link)
+        self.assertTrue(context_args.fetch_link)
+
+    def test_extract_parses_force_and_targeting(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["extract", "--force", "--limit", "5", "--bookmark-id", "123"])
+        self.assertTrue(args.force)
+        self.assertEqual(args.limit, 5)
+        self.assertEqual(args.bookmark_id, "123")
+
+    def test_augment_result_fetches_link_on_demand(self) -> None:
+        result = {
+            "id": "1",
+            "external_urls": ["https://example.com/post"],
+            "linked_title": "",
+            "linked_description": "",
+            "linked_preview": "",
+        }
+        with mock.patch("cli._extract_link_context_from_urls", return_value={
+            "url": "https://example.com/post",
+            "title": "Example article",
+            "description": "Short description",
+            "content": "Longer linked content",
+        }):
+            enriched = _augment_result_with_link_context(result, fetch_link=True)
+        self.assertEqual(enriched["linked_source"], "fetched")
+        self.assertEqual(enriched["linked_title"], "Example article")
+        self.assertEqual(enriched["linked_url"], "https://example.com/post")
 
 
 if __name__ == "__main__":

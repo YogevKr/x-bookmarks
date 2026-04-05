@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 from bookmark_paths import resolve_base_dir
 from text_repair import repair_value
 
-INDEX_VERSION = 2
+INDEX_VERSION = 3
 VECTOR_DIM = 256
 RRF_K = 60
 SKIP_DOMAINS = {"x.com", "twitter.com", "t.co"}
@@ -53,6 +53,10 @@ class IndexPaths:
     def manifest_file(self) -> Path:
         return self.data_dir / "manifest.json"
 
+    @property
+    def sync_state_file(self) -> Path:
+        return self.data_dir / "sync-state.json"
+
 
 def default_paths() -> IndexPaths:
     return IndexPaths(base_dir=resolve_base_dir())
@@ -72,6 +76,24 @@ def _read_json(path: Path, *, strict: bool = True) -> dict | None:
         if strict:
             raise
         return None
+
+
+def _load_sync_state(paths: IndexPaths) -> dict:
+    return _read_json(paths.sync_state_file, strict=False) or {}
+
+
+def _sync_state_summary(paths: IndexPaths) -> dict:
+    state = _load_sync_state(paths)
+    tombstones = state.get("tombstones", {})
+    archive = state.get("archive", {})
+    return {
+        "exists": paths.sync_state_file.exists(),
+        "path": str(paths.sync_state_file),
+        "updated_at": state.get("updated_at"),
+        "tombstone_count": len(tombstones),
+        "archive_count": len(archive),
+        "deleted_ids": sorted(tombstones),
+    }
 
 
 def _sha256(path: Path) -> str | None:
@@ -140,6 +162,18 @@ def iter_external_domains(bookmark: dict) -> list[str]:
     return domains
 
 
+def external_urls(bookmark: dict) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for url in bookmark.get("urls", []):
+        domain = urlparse(url).netloc.casefold().removeprefix("www.")
+        if not domain or domain in SKIP_DOMAINS or url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
+
+
 def bookmark_categories(bookmark: dict) -> list[str]:
     return list(bookmark.get("ai", {}).get("categories", []))
 
@@ -164,10 +198,78 @@ def bookmark_summary(bookmark: dict, limit: int = 110) -> str:
     summary = str(bookmark.get("ai", {}).get("summary", "")).strip()
     if summary:
         return _truncate(summary, limit)
-    title = str(bookmark.get("extracted", {}).get("title", "")).strip()
+    title = bookmark_link_title(bookmark)
     if title:
         return _truncate(title, limit)
     return _truncate(str(bookmark.get("text", "")).strip(), limit)
+
+
+def bookmark_link_pages(bookmark: dict) -> list[dict]:
+    pages = [page for page in bookmark.get("linked_pages", []) if isinstance(page, dict)]
+    if pages:
+        return pages
+    extracted = bookmark.get("extracted")
+    return [extracted] if isinstance(extracted, dict) and extracted else []
+
+
+def bookmark_text_preview(bookmark: dict, limit: int = 180) -> str:
+    return _truncate(str(bookmark.get("text", "")).strip(), limit)
+
+
+def bookmark_link_title(bookmark: dict) -> str:
+    page = next(iter(bookmark_link_pages(bookmark)), {})
+    return str(page.get("title", "")).strip()
+
+
+def bookmark_link_description(bookmark: dict, limit: int = 160) -> str:
+    page = next(iter(bookmark_link_pages(bookmark)), {})
+    return _truncate(str(page.get("description", "")).strip(), limit)
+
+
+def bookmark_link_preview(bookmark: dict, limit: int = 260) -> str:
+    page = next(iter(bookmark_link_pages(bookmark)), {})
+    for field in ("preview", "content", "description", "title"):
+        value = str(page.get(field, "")).strip()
+        if value:
+            return _truncate(value, limit)
+    return ""
+
+
+def bookmark_link_url(bookmark: dict) -> str:
+    page = next(iter(bookmark_link_pages(bookmark)), {})
+    return str(page.get("url", "")).strip()
+
+
+def bookmark_link_site(bookmark: dict) -> str:
+    page = next(iter(bookmark_link_pages(bookmark)), {})
+    return str(page.get("site_name", "")).strip()
+
+
+def _parsed_from_bookmark(bookmark: dict, *, deleted: bool = False, deleted_info: dict | None = None) -> dict:
+    dt = bookmark_date(bookmark)
+    categories = bookmark_categories(bookmark)
+    entities = bookmark_entities(bookmark)
+    domains = iter_external_domains(bookmark)
+    return {
+        "id": str(bookmark["id"]),
+        "bookmark": repair_value(bookmark),
+        "handle": str(bookmark.get("handle", "")),
+        "author": str(bookmark.get("author", "")),
+        "date": dt.strftime("%Y-%m-%d") if dt else "?",
+        "text": str(bookmark.get("text", "")),
+        "summary": bookmark_summary(bookmark),
+        "url": tweet_url(bookmark),
+        "categories": categories,
+        "entities": entities,
+        "domains": domains,
+        "language": bookmark_language(bookmark),
+        "type": bookmark_type(bookmark),
+        "importance": bookmark_importance(bookmark),
+        "search_text": _combined_search_text(bookmark),
+        "vector": _bookmark_vector(bookmark),
+        "deleted": deleted,
+        "deleted_info": deleted_info or {},
+    }
 
 
 def bookmark_importance(bookmark: dict) -> int | None:
@@ -245,6 +347,8 @@ def _merge_bookmark_corpus(paths: IndexPaths | None = None) -> tuple[dict, list[
             existing = base_rows.get(bookmark["id"])
             if not existing:
                 continue
+            if bookmark.get("linked_pages"):
+                existing["linked_pages"] = bookmark["linked_pages"]
             if bookmark.get("extracted"):
                 existing["extracted"] = bookmark["extracted"]
 
@@ -254,6 +358,10 @@ def _merge_bookmark_corpus(paths: IndexPaths | None = None) -> tuple[dict, list[
             existing = base_rows.get(bookmark["id"])
             if not existing:
                 continue
+            if bookmark.get("linked_pages"):
+                existing["linked_pages"] = bookmark["linked_pages"]
+            if bookmark.get("extracted"):
+                existing["extracted"] = bookmark["extracted"]
             if bookmark.get("ai"):
                 existing["ai"] = bookmark["ai"]
 
@@ -309,6 +417,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             domains_json TEXT,
             domains_flat TEXT,
             hashtags_json TEXT,
+            linked_pages_json TEXT,
             extracted_title TEXT,
             extracted_description TEXT,
             extracted_content TEXT,
@@ -324,20 +433,35 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE bookmarks ADD COLUMN media_count INTEGER")
     except sqlite3.OperationalError:
         pass
+    try:
+        conn.execute("ALTER TABLE bookmarks ADD COLUMN linked_pages_json TEXT")
+    except sqlite3.OperationalError:
+        pass
     conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(id UNINDEXED, text, summary, categories, entities, extracted_title, extracted_description, extracted_content, author, handle, domains, hashtags, tokenize='unicode61')")
 
 
 def _combined_search_text(bookmark: dict) -> str:
-    extracted = bookmark.get("extracted", {})
+    link_pages = bookmark_link_pages(bookmark)
     ai = bookmark.get("ai", {})
+    extracted_text = "\n".join(
+        piece
+        for page in link_pages
+        for piece in (
+            str(page.get("title", "")),
+            str(page.get("description", "")),
+            str(page.get("preview", "")),
+            str(page.get("content", ""))[:1600],
+            str(page.get("site_name", "")),
+            str(page.get("url", "")),
+        )
+        if piece
+    )
     pieces = [
         str(bookmark.get("text", "")),
         str(ai.get("summary", "")),
         " ".join(bookmark_categories(bookmark)),
         " ".join(bookmark_entities(bookmark)),
-        str(extracted.get("title", "")),
-        str(extracted.get("description", "")),
-        str(extracted.get("content", ""))[:4000],
+        extracted_text[:6000],
         str(bookmark.get("author", "")),
         str(bookmark.get("handle", "")),
         " ".join(iter_external_domains(bookmark)),
@@ -370,17 +494,22 @@ def _normalize_vector(values: list[float]) -> list[float]:
 
 
 def _bookmark_vector(bookmark: dict) -> list[float]:
-    extracted = bookmark.get("extracted", {})
+    link_pages = bookmark_link_pages(bookmark)
     ai = bookmark.get("ai", {})
+    link_titles = " ".join(str(page.get("title", "")) for page in link_pages if page.get("title"))
+    link_descriptions = " ".join(str(page.get("description", "")) for page in link_pages if page.get("description"))
+    link_content = "\n".join(str(page.get("content", ""))[:1000] for page in link_pages if page.get("content"))
+    link_sites = " ".join(str(page.get("site_name", "")) for page in link_pages if page.get("site_name"))
     vector = [0.0] * VECTOR_DIM
     parts = [
         (str(bookmark.get("text", "")), 3.0, True),
         (str(ai.get("summary", "")), 2.0, True),
         (" ".join(bookmark_categories(bookmark)), 2.0, False),
         (" ".join(bookmark_entities(bookmark)), 2.0, False),
-        (str(extracted.get("title", "")), 2.0, True),
-        (str(extracted.get("description", "")), 1.0, True),
-        (str(extracted.get("content", ""))[:2000], 1.0, True),
+        (link_titles, 2.0, True),
+        (link_descriptions, 1.0, True),
+        (link_content[:2000], 1.0, True),
+        (link_sites, 0.5, False),
         (" ".join(iter_external_domains(bookmark)), 1.5, False),
         (str(bookmark.get("author", "")), 1.0, False),
         (str(bookmark.get("handle", "")), 1.0, False),
@@ -412,12 +541,16 @@ def _dot(left: list[float], right: list[float]) -> float:
 
 def _row_from_bookmark(bookmark: dict) -> dict:
     dt = bookmark_date(bookmark)
-    extracted = bookmark.get("extracted", {})
+    link_pages = bookmark_link_pages(bookmark)
+    primary_link = link_pages[0] if link_pages else bookmark.get("extracted", {})
     categories = bookmark_categories(bookmark)
     entities = bookmark_entities(bookmark)
     domains = iter_external_domains(bookmark)
     hashtags = list(bookmark.get("hashtags", []))
     vector = _pack_vector(_bookmark_vector(bookmark))
+    aggregated_titles = "\n".join(str(page.get("title", "")) for page in link_pages if page.get("title"))
+    aggregated_descriptions = "\n".join(str(page.get("description", "")) for page in link_pages if page.get("description"))
+    aggregated_content = "\n\n".join(str(page.get("content", ""))[:1200] for page in link_pages if page.get("content"))[:4000]
     return {
         "id": bookmark["id"],
         "handle": str(bookmark.get("handle", "")),
@@ -439,10 +572,11 @@ def _row_from_bookmark(bookmark: dict) -> dict:
         "domains_json": json.dumps(domains, ensure_ascii=False),
         "domains_flat": " | ".join(domains),
         "hashtags_json": json.dumps(hashtags, ensure_ascii=False),
+        "linked_pages_json": json.dumps(link_pages, ensure_ascii=False),
         "hashtags_text": " ".join(hashtags),
-        "extracted_title": str(extracted.get("title", "")),
-        "extracted_description": str(extracted.get("description", "")),
-        "extracted_content": str(extracted.get("content", ""))[:4000],
+        "extracted_title": aggregated_titles or str(primary_link.get("title", "")),
+        "extracted_description": aggregated_descriptions or str(primary_link.get("description", "")),
+        "extracted_content": aggregated_content or str(primary_link.get("content", ""))[:4000],
         "search_text": _combined_search_text(bookmark),
         "vector": vector,
     }
@@ -483,9 +617,9 @@ def refresh_index(*, paths: IndexPaths | None = None, force: bool = False) -> di
                         id, handle, author, timestamp, date, year, text, summary, language, type, importance,
                         media_count,
                         categories_json, categories_flat, entities_json, entities_flat, urls_json, domains_json,
-                        domains_flat, hashtags_json, extracted_title, extracted_description, extracted_content,
+                        domains_flat, hashtags_json, linked_pages_json, extracted_title, extracted_description, extracted_content,
                         search_text, vector
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["id"],
@@ -508,6 +642,7 @@ def refresh_index(*, paths: IndexPaths | None = None, force: bool = False) -> di
                         row["domains_json"],
                         row["domains_flat"],
                         row["hashtags_json"],
+                        row["linked_pages_json"],
                         row["extracted_title"],
                         row["extracted_description"],
                         row["extracted_content"],
@@ -565,6 +700,7 @@ def get_index_status(*, paths: IndexPaths | None = None) -> dict:
     current_paths = paths or default_paths()
     source_state, bookmarks = _merge_bookmark_corpus(current_paths)
     manifest = _load_manifest(current_paths)
+    sync_state = _sync_state_summary(current_paths)
     db_exists = current_paths.index_db.exists()
     reasons: list[str] = []
 
@@ -605,6 +741,7 @@ def get_index_status(*, paths: IndexPaths | None = None) -> dict:
         "doc_count": len(bookmarks),
         "indexed_count": indexed_count,
         "source_state": source_state,
+        "sync_state": sync_state,
         "built_at": manifest.get("built_at") if manifest else None,
     }
 
@@ -623,6 +760,12 @@ def _parse_row(row: sqlite3.Row) -> dict:
     urls = json.loads(row["urls_json"] or "[]")
     domains = json.loads(row["domains_json"] or "[]")
     hashtags = json.loads(row["hashtags_json"] or "[]")
+    linked_pages = json.loads(row["linked_pages_json"] or "[]")
+    primary_link = linked_pages[0] if linked_pages else {
+        "title": row["extracted_title"],
+        "description": row["extracted_description"],
+        "content": row["extracted_content"],
+    }
     bookmark = {
         "id": row["id"],
         "handle": row["handle"],
@@ -631,11 +774,8 @@ def _parse_row(row: sqlite3.Row) -> dict:
         "text": row["text"],
         "urls": urls,
         "hashtags": hashtags,
-        "extracted": {
-            "title": row["extracted_title"],
-            "description": row["extracted_description"],
-            "content": row["extracted_content"],
-        },
+        "linked_pages": linked_pages,
+        "extracted": primary_link,
         "ai": {
             "summary": row["summary"],
             "categories": categories,
@@ -722,7 +862,7 @@ def _vector_candidates(conn: sqlite3.Connection, query: str, filters: dict, limi
     where = "WHERE " + " AND ".join(clauses) if clauses else ""
     sql = f"""
         SELECT id, handle, author, timestamp, date, text, summary, language, type, importance,
-               categories_json, entities_json, urls_json, domains_json, hashtags_json,
+               categories_json, entities_json, urls_json, domains_json, hashtags_json, linked_pages_json,
                extracted_title, extracted_description, extracted_content, search_text, vector
         FROM bookmarks
         {where}
@@ -748,7 +888,7 @@ def _fetch_rows_by_ids(conn: sqlite3.Connection, ids: list[str]) -> dict[str, di
     rows = conn.execute(
         f"""
         SELECT id, handle, author, timestamp, date, text, summary, language, type, importance,
-               categories_json, entities_json, urls_json, domains_json, hashtags_json,
+               categories_json, entities_json, urls_json, domains_json, hashtags_json, linked_pages_json,
                extracted_title, extracted_description, extracted_content, search_text, vector
         FROM bookmarks
         WHERE id IN ({placeholders})
@@ -789,12 +929,91 @@ def _result_payload(result: dict, *, score: float | None = None, bm25_rank: int 
         "categories": result["categories"],
         "entities": result["entities"],
         "domains": result["domains"],
+        "hashtags": list(bookmark.get("hashtags", [])),
+        "external_urls": external_urls(bookmark),
+        "link_pages": bookmark_link_pages(bookmark),
         "language": result["language"],
         "type": result["type"],
         "importance": result["importance"],
+        "tweet_preview": bookmark_text_preview(bookmark),
+        "linked_title": bookmark_link_title(bookmark),
+        "linked_description": bookmark_link_description(bookmark),
+        "linked_preview": bookmark_link_preview(bookmark),
+        "linked_url": bookmark_link_url(bookmark),
+        "linked_site": bookmark_link_site(bookmark),
         "score": round(score, 6) if score is not None else None,
         "why": _match_reasons(result, query or "", bm25_rank, vector_rank) if query else [],
+        "deleted": bool(result.get("deleted")),
+        "deleted_at": result.get("deleted_info", {}).get("deleted_at"),
+        "deletion_source": result.get("deleted_info", {}).get("source"),
     }
+
+
+def _deleted_result_payloads(paths: IndexPaths) -> list[dict]:
+    state = _load_sync_state(paths)
+    tombstones = state.get("tombstones", {})
+    archive = state.get("archive", {})
+    payloads: list[dict] = []
+    for bookmark_id, deleted_info in tombstones.items():
+        bookmark = archive.get(bookmark_id)
+        if not isinstance(bookmark, dict) or not bookmark.get("id"):
+            continue
+        payloads.append(_result_payload(_parsed_from_bookmark(bookmark, deleted=True, deleted_info=deleted_info)))
+    payloads.sort(
+        key=lambda item: (
+            str(item.get("deleted_at") or ""),
+            str(item.get("date") or ""),
+            str(item["id"]),
+        ),
+        reverse=True,
+    )
+    return payloads
+
+
+def _matches_deleted_filters(
+    item: dict,
+    *,
+    query: str | None = None,
+    author: str | None = None,
+    category: str | None = None,
+    domain: str | None = None,
+    language: str | None = None,
+    bookmark_type_value: str | None = None,
+    after: str | None = None,
+    before: str | None = None,
+) -> bool:
+    if author and item.get("handle") != author:
+        return False
+    if category and category not in item.get("categories", []):
+        return False
+    if domain and domain not in item.get("domains", []):
+        return False
+    if language and item.get("language") != language:
+        return False
+    if bookmark_type_value and item.get("type") != bookmark_type_value:
+        return False
+    item_date = parse_cli_date(item.get("date")) if item.get("date") and item.get("date") != "?" else None
+    after_date = parse_cli_date(after)
+    before_date = parse_cli_date(before)
+    if after_date and item_date and item_date < after_date:
+        return False
+    if before_date and item_date and item_date > before_date:
+        return False
+    if query:
+        haystack = "\n".join(
+            [
+                str(item.get("summary", "")),
+                str(item.get("text", "")),
+                str(item.get("linked_title", "")),
+                str(item.get("linked_description", "")),
+                str(item.get("linked_preview", "")),
+                " ".join(item.get("categories", [])),
+                " ".join(item.get("entities", [])),
+            ]
+        ).casefold()
+        if query.casefold() not in haystack:
+            return False
+    return True
 
 
 def _group_results(results: list[dict], group_by: str) -> dict:
@@ -896,10 +1115,31 @@ def list_bookmarks(
     limit: int = 30,
     offset: int = 0,
     sort: str = "date",
+    deleted: bool = False,
     auto_refresh: bool = True,
     paths: IndexPaths | None = None,
 ) -> list[dict]:
     current_paths = paths or default_paths()
+    if deleted:
+        results = [
+            item
+            for item in _deleted_result_payloads(current_paths)
+            if _matches_deleted_filters(
+                item,
+                query=query,
+                author=author,
+                category=category,
+                domain=domain,
+                language=language,
+                bookmark_type_value=bookmark_type_value,
+                after=after,
+                before=before,
+            )
+        ]
+        if sort == "date":
+            results.sort(key=lambda item: item["date"], reverse=True)
+        return results[offset : offset + limit]
+
     ensure_index(paths=current_paths, auto_refresh=auto_refresh)
     if query:
         results = search_bookmarks(
@@ -936,7 +1176,7 @@ def list_bookmarks(
         rows = conn.execute(
             f"""
             SELECT id, handle, author, timestamp, date, text, summary, language, type, importance,
-                   categories_json, entities_json, urls_json, domains_json, hashtags_json,
+                   categories_json, entities_json, urls_json, domains_json, hashtags_json, linked_pages_json,
                    extracted_title, extracted_description, extracted_content, search_text, vector
             FROM bookmarks
             {where}
@@ -958,7 +1198,7 @@ def show_bookmark(bookmark_id: str, *, auto_refresh: bool = True, paths: IndexPa
         row = conn.execute(
             """
             SELECT id, handle, author, timestamp, date, text, summary, language, type, importance,
-                   categories_json, entities_json, urls_json, domains_json, hashtags_json,
+                   categories_json, entities_json, urls_json, domains_json, hashtags_json, linked_pages_json,
                    extracted_title, extracted_description, extracted_content, search_text, vector
             FROM bookmarks WHERE id = ?
             """,
@@ -972,6 +1212,14 @@ def show_bookmark(bookmark_id: str, *, auto_refresh: bool = True, paths: IndexPa
         conn.close()
 
 
+def show_deleted_bookmark(bookmark_id: str, *, paths: IndexPaths | None = None) -> dict | None:
+    current_paths = paths or default_paths()
+    for item in _deleted_result_payloads(current_paths):
+        if item["id"] == bookmark_id:
+            return item
+    return None
+
+
 def bookmark_context(bookmark_id: str, *, limit: int = 5, auto_refresh: bool = True, paths: IndexPaths | None = None) -> dict | None:
     current_paths = paths or default_paths()
     ensure_index(paths=current_paths, auto_refresh=auto_refresh)
@@ -980,7 +1228,7 @@ def bookmark_context(bookmark_id: str, *, limit: int = 5, auto_refresh: bool = T
         row = conn.execute(
             """
             SELECT id, handle, author, timestamp, date, text, summary, language, type, importance,
-                   categories_json, entities_json, urls_json, domains_json, hashtags_json,
+                   categories_json, entities_json, urls_json, domains_json, hashtags_json, linked_pages_json,
                    extracted_title, extracted_description, extracted_content, search_text, vector
             FROM bookmarks WHERE id = ?
             """,
@@ -1210,9 +1458,11 @@ def format_search_results(results: list[dict] | dict) -> str:
             for idx, result in enumerate(group["results"], start=1):
                 labels = [label for label in [result["type"], *result["categories"][:2]] if label and label != "unknown"]
                 meta = " · ".join([result["date"], result["handle"], *labels])
+                if result.get("deleted"):
+                    meta = f"[deleted] {meta}"
                 why = f" [{', '.join(result['why'][:3])}]" if result.get("why") else ""
                 lines.append(f"{idx}. {meta}{why}")
-                lines.append(f"   {result['summary']}")
+                lines.extend(_format_result_preview_lines(result))
                 lines.append(f"   {result['url']}")
         return "\n".join(lines).strip()
 
@@ -1223,9 +1473,11 @@ def format_search_results(results: list[dict] | dict) -> str:
     for idx, result in enumerate(results, start=1):
         labels = [label for label in [result["type"], *result["categories"][:2]] if label and label != "unknown"]
         meta = " · ".join([result["date"], result["handle"], *labels])
+        if result.get("deleted"):
+            meta = f"[deleted] {meta}"
         why = f" [{', '.join(result['why'][:3])}]" if result.get("why") else ""
         lines.append(f"{idx}. {meta}{why}")
-        lines.append(f"   {result['summary']}")
+        lines.extend(_format_result_preview_lines(result))
         lines.append(f"   {result['url']}")
     return "\n\n".join(lines)
 
@@ -1236,8 +1488,11 @@ def format_list_results(results: list[dict]) -> str:
     lines: list[str] = []
     for result in results:
         labels = [label for label in [result["id"], result["date"], result["handle"], result["type"], *result["categories"][:2]] if label and label != "unknown"]
-        lines.append(" · ".join(labels))
-        lines.append(f"  {result['summary']}")
+        prefix = "[deleted] " if result.get("deleted") else ""
+        lines.append(f"{prefix}{' · '.join(labels)}")
+        lines.extend("  " + line[3:] if line.startswith("   ") else line for line in _format_result_preview_lines(result))
+        if result.get("deleted_at"):
+            lines.append(f"  deleted: {result['deleted_at']} ({result.get('deletion_source') or 'unknown'})")
         if result["domains"]:
             lines.append(f"  domains: {', '.join(result['domains'][:4])}")
         if result.get("why"):
@@ -1247,24 +1502,111 @@ def format_list_results(results: list[dict]) -> str:
     return "\n".join(lines).rstrip()
 
 
+def _format_result_preview_lines(result: dict) -> list[str]:
+    lines = [f"   {result['summary']}"]
+    tweet_preview = result.get("tweet_preview", "")
+    if tweet_preview and tweet_preview.casefold() != str(result["summary"]).casefold():
+        lines.append(f"   tweet: {tweet_preview}")
+    linked_title = str(result.get("linked_title", "")).strip()
+    linked_description = str(result.get("linked_description", "")).strip()
+    linked_preview = str(result.get("linked_preview", "")).strip()
+    if linked_title:
+        linked_line = linked_title
+        if linked_description and linked_description.casefold() != linked_title.casefold():
+            linked_line = f"{linked_line} — {linked_description}"
+        lines.append(f"   link: {linked_line}")
+    elif linked_description:
+        lines.append(f"   link: {linked_description}")
+    elif linked_preview and linked_preview.casefold() != tweet_preview.casefold():
+        lines.append(f"   link: {linked_preview}")
+    return lines
+
+
 def format_show_result(result: dict | None) -> str:
     if not result:
         return "Bookmark not found."
     lines = [
-        f"{result['id']} · {result['handle']} · {result['date']}",
+        f"{'[deleted] ' if result.get('deleted') else ''}{result['id']} · {result['handle']} · {result['date']}",
         result["url"],
         "",
         result["summary"],
         "",
+        "tweet",
         result["text"],
     ]
+    if result.get("deleted_at"):
+        lines.extend(["", f"deleted: {result['deleted_at']} ({result.get('deletion_source') or 'unknown'})"])
+    if result.get("linked_title") or result.get("linked_description") or result.get("linked_preview"):
+        heading = "linked"
+        if result.get("linked_source") in {"stored", "fetched"}:
+            heading = f"{heading} ({result['linked_source']})"
+        lines.extend(["", heading])
+        if result.get("linked_url"):
+            lines.append(result["linked_url"])
+        if result.get("linked_title"):
+            lines.append(result["linked_title"])
+        if result.get("linked_description"):
+            lines.append(result["linked_description"])
+        linked_preview = str(result.get("linked_preview", "")).strip()
+        linked_description = str(result.get("linked_description", "")).strip()
+        linked_title = str(result.get("linked_title", "")).strip()
+        if linked_preview and linked_preview.casefold() not in {
+            linked_title.casefold(),
+            linked_description.casefold(),
+        }:
+            lines.extend(["", linked_preview])
+    elif result.get("linked_url"):
+        heading = "linked"
+        if result.get("linked_source") == "available":
+            heading = f"{heading} (available)"
+        elif result.get("linked_source") == "fetch_failed":
+            heading = f"{heading} (fetch failed)"
+        lines.extend(["", heading, result["linked_url"]])
+        if result.get("linked_source") == "available":
+            lines.append("(use --fetch-link to extract this page now)")
+    extra_pages = list(result.get("link_pages", []))[1:]
+    if extra_pages:
+        lines.extend(["", "other links"])
+        for page in extra_pages[:3]:
+            lines.extend(_format_link_page(page, bullet=True))
     if result["categories"]:
         lines.extend(["", f"categories: {', '.join(result['categories'])}"])
     if result["entities"]:
         lines.extend(["", f"entities: {', '.join(result['entities'])}"])
     if result["domains"]:
         lines.extend(["", f"domains: {', '.join(result['domains'])}"])
+    if result["hashtags"]:
+        lines.extend(["", f"hashtags: {', '.join('#' + tag.lstrip('#') for tag in result['hashtags'][:8])}"])
     return "\n".join(lines)
+
+
+def _format_related_item(item: dict) -> list[str]:
+    lines = [f"- {item['id']} · {item['date']} · {item['handle']} · {item['summary']}"]
+    tweet_preview = str(item.get("tweet_preview", "")).strip()
+    if tweet_preview and tweet_preview.casefold() != str(item["summary"]).casefold():
+        lines.append(f"  tweet: {tweet_preview}")
+    linked_title = str(item.get("linked_title", "")).strip()
+    if linked_title:
+        lines.append(f"  link: {linked_title}")
+    return lines
+
+
+def _format_link_page(page: dict, *, bullet: bool = False) -> list[str]:
+    prefix = "- " if bullet else ""
+    title = str(page.get("title", "")).strip() or str(page.get("url", "")).strip() or "(untitled link)"
+    url = str(page.get("url", "")).strip()
+    site = str(page.get("site_name", "")).strip()
+    description = _truncate(str(page.get("description", "")).strip(), 160)
+    preview = _truncate(str(page.get("preview", "")).strip() or str(page.get("content", "")).strip(), 220)
+    label = title if not site else f"{title} [{site}]"
+    lines = [f"{prefix}{label}"]
+    if url:
+        lines.append(f"  {url}")
+    if description and description.casefold() != title.casefold():
+        lines.append(f"  {description}")
+    if preview and preview.casefold() not in {title.casefold(), description.casefold()}:
+        lines.append(f"  {preview}")
+    return lines
 
 
 def format_context_result(result: dict | None) -> str:
@@ -1277,7 +1619,7 @@ def format_context_result(result: dict | None) -> str:
             continue
         lines.extend(["", section.replace("_", " ").title()])
         for item in items:
-            lines.append(f"- {item['id']} · {item['date']} · {item['handle']} · {item['summary']}")
+            lines.extend(_format_related_item(item))
     if result.get("previous_id") or result.get("next_id"):
         lines.extend(["", f"timeline: prev={result.get('previous_id')} next={result.get('next_id')}"])
     return "\n".join(lines)

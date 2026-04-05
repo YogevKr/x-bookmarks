@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from bookmark_query import IndexPaths, get_index_status, list_bookmarks
-from bookmark_sync import sync_bookmarks
+from bookmark_sync import remove_bookmarks, restore_bookmarks, sync_bookmarks
 
 
 BASE_PAYLOAD = {
@@ -91,6 +91,9 @@ class BookmarkSyncTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
+    def _read_json(self, name: str) -> dict:
+        return json.loads((self.base / name).read_text(encoding="utf-8"))
+
     def test_sync_removes_deleted_bookmarks_everywhere(self) -> None:
         new_export = {
             **BASE_PAYLOAD,
@@ -102,6 +105,7 @@ class BookmarkSyncTest(unittest.TestCase):
         result = sync_bookmarks(input_file=import_file, paths=self.paths)
 
         self.assertEqual(result["bookmarks"]["removed"], 1)
+        self.assertEqual(result["bidirectional"]["detected_deletes"], 0)
         self.assertEqual(result["index"]["doc_count"], 2)
 
         enriched = json.loads((self.base / "enriched.json").read_text(encoding="utf-8"))
@@ -122,9 +126,57 @@ class BookmarkSyncTest(unittest.TestCase):
         result = sync_bookmarks(reconcile_only=True, paths=self.paths)
 
         self.assertEqual(result["bookmarks"]["removed"], 0)
-        self.assertEqual(result["derived"]["categorized"]["removed"], 2)
-        categorized = json.loads((self.base / "categorized.json").read_text(encoding="utf-8"))
+        self.assertEqual(result["bidirectional"]["detected_deletes"], 0)
+        categorized = self._read_json("categorized.json")
         self.assertEqual(len(categorized["bookmarks"]), 1)
+
+    def test_delete_from_enriched_propagates_everywhere(self) -> None:
+        sync_bookmarks(reconcile_only=True, paths=self.paths)
+        enriched = self._read_json("enriched.json")
+        enriched["bookmarks"] = [bookmark for bookmark in enriched["bookmarks"] if bookmark["id"] != "2"]
+        (self.base / "enriched.json").write_text(json.dumps(enriched, ensure_ascii=False), encoding="utf-8")
+
+        result = sync_bookmarks(reconcile_only=True, paths=self.paths)
+
+        self.assertEqual(result["bidirectional"]["detected_deletes"], 1)
+        self.assertEqual(result["bookmarks"]["current"], 2)
+        for name in ("bookmarks.json", "enriched.json", "categorized.json"):
+            ids = {bookmark["id"] for bookmark in self._read_json(name)["bookmarks"]}
+            self.assertEqual(ids, {"1", "3"})
+
+    def test_remove_uses_tombstone_and_blocks_reimport(self) -> None:
+        sync_bookmarks(reconcile_only=True, paths=self.paths)
+
+        remove_result = remove_bookmarks(["2"], paths=self.paths)
+        self.assertEqual(remove_result["mutation"]["removed"], ["2"])
+        self.assertEqual({bookmark["id"] for bookmark in self._read_json("bookmarks.json")["bookmarks"]}, {"1", "3"})
+
+        import_file = self.base / "reimport.json"
+        import_file.write_text(json.dumps(BASE_PAYLOAD, ensure_ascii=False), encoding="utf-8")
+        result = sync_bookmarks(input_file=import_file, paths=self.paths)
+
+        self.assertEqual(result["bookmarks"]["current"], 2)
+        self.assertEqual({bookmark["id"] for bookmark in self._read_json("bookmarks.json")["bookmarks"]}, {"1", "3"})
+
+    def test_restore_rehydrates_from_archive(self) -> None:
+        sync_bookmarks(reconcile_only=True, paths=self.paths)
+        remove_bookmarks(["2"], paths=self.paths)
+
+        result = restore_bookmarks(["2"], paths=self.paths)
+
+        self.assertEqual(result["mutation"]["restored"], ["2"])
+        ids = {bookmark["id"] for bookmark in self._read_json("bookmarks.json")["bookmarks"]}
+        self.assertEqual(ids, {"1", "2", "3"})
+
+    def test_restore_all_rehydrates_all_tombstones(self) -> None:
+        sync_bookmarks(reconcile_only=True, paths=self.paths)
+        remove_bookmarks(["1", "2"], paths=self.paths)
+
+        result = restore_bookmarks([], paths=self.paths)
+
+        self.assertEqual(result["mutation"]["restored"], ["1", "2"])
+        ids = {bookmark["id"] for bookmark in self._read_json("bookmarks.json")["bookmarks"]}
+        self.assertEqual(ids, {"1", "2", "3"})
 
 
 if __name__ == "__main__":
