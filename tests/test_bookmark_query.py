@@ -7,6 +7,7 @@ from bookmark_query import (
     IndexPaths,
     bookmark_context,
     collect_stats,
+    doctor_report,
     domain_counts,
     format_context_result,
     format_search_results,
@@ -174,6 +175,14 @@ class BookmarkIndexTest(unittest.TestCase):
         self.assertEqual(results[0]["id"], "1")
         self.assertIn("bm25#1", results[0]["why"])
 
+    def test_search_explain_surfaces_matched_fields(self) -> None:
+        results = search_bookmarks("observability", limit=5, explain=True, paths=self.paths)
+        self.assertEqual(results[0]["id"], "1")
+        self.assertIn("explain", results[0])
+        self.assertIn("summary", results[0]["explain"]["matched_fields"])
+        self.assertEqual(results[0]["explain"]["rrf"]["bm25_rank"], 1)
+        self.assertTrue(results[0]["explain"]["matched_link_pages"])
+
     def test_search_matches_secondary_link_content(self) -> None:
         results = search_bookmarks("collector tuning", limit=5, paths=self.paths)
         self.assertEqual(results[0]["id"], "1")
@@ -200,10 +209,11 @@ class BookmarkIndexTest(unittest.TestCase):
 
     def test_formatters_include_context_previews(self) -> None:
         refresh_index(paths=self.paths)
-        results = search_bookmarks("observability", limit=5, paths=self.paths)
+        results = search_bookmarks("observability", limit=5, explain=True, paths=self.paths)
         output = format_search_results(results)
         self.assertIn("tweet:", output)
         self.assertIn("link:", output)
+        self.assertIn("explain:", output)
 
         shown = show_bookmark("1", paths=self.paths)
         show_output = format_show_result(shown)
@@ -254,6 +264,21 @@ class BookmarkIndexTest(unittest.TestCase):
         assert shown is not None
         self.assertTrue(shown["deleted"])
         self.assertEqual(shown["id"], "2")
+
+    def test_doctor_report_detects_tombstone_archive_health(self) -> None:
+        sync_bookmarks(reconcile_only=True, paths=self.paths)
+        report = doctor_report(paths=self.paths)
+        self.assertTrue(report["ok"])
+        self.assertGreaterEqual(len(report["checks"]), 5)
+
+        sync_state_path = self.paths.sync_state_file
+        sync_state = json.loads(sync_state_path.read_text(encoding="utf-8"))
+        sync_state["tombstones"]["999"] = {"deleted_at": "2026-04-05T00:00:00+00:00", "source": "test"}
+        sync_state_path.write_text(json.dumps(sync_state, ensure_ascii=False), encoding="utf-8")
+
+        broken = doctor_report(paths=self.paths)
+        self.assertFalse(broken["ok"])
+        self.assertTrue(any(check["name"] == "tombstones_missing_archive" and check["status"] == "error" for check in broken["checks"]))
 
 
 if __name__ == "__main__":

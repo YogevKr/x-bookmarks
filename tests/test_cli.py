@@ -21,6 +21,13 @@ class CliSurfaceTest(unittest.TestCase):
         self.assertTrue(args.reconcile_only)
         self.assertTrue(args.json)
 
+    def test_search_explain_and_doctor_parse(self) -> None:
+        parser = build_parser()
+        search_args = parser.parse_args(["search", "observability", "--explain"])
+        doctor_args = parser.parse_args(["doctor", "--json"])
+        self.assertTrue(search_args.explain)
+        self.assertTrue(doctor_args.json)
+
     def test_remove_and_restore_parse_ids(self) -> None:
         parser = build_parser()
         remove_args = parser.parse_args(["remove", "123", "456", "--json"])

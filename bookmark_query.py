@@ -96,6 +96,13 @@ def _sync_state_summary(paths: IndexPaths) -> dict:
     }
 
 
+def _doctor_check(name: str, status: str, detail: str, *, data: dict | None = None) -> dict:
+    payload = {"name": name, "status": status, "detail": detail}
+    if data is not None:
+        payload["data"] = data
+    return payload
+
+
 def _sha256(path: Path) -> str | None:
     if not path.exists():
         return None
@@ -754,6 +761,124 @@ def ensure_index(*, paths: IndexPaths | None = None, auto_refresh: bool = True, 
     return status
 
 
+def doctor_report(*, paths: IndexPaths | None = None) -> dict:
+    current_paths = paths or default_paths()
+    status = get_index_status(paths=current_paths)
+    sync_state_raw = _read_json(current_paths.sync_state_file, strict=False)
+    sync_state = sync_state_raw or {}
+    source_state, merged_bookmarks = _merge_bookmark_corpus(current_paths)
+    merged_ids = {bookmark["id"] for bookmark in merged_bookmarks}
+    checks: list[dict] = []
+
+    bookmarks_snapshot = status["source_state"]["files"]["bookmarks"]
+    if not bookmarks_snapshot["exists"]:
+        checks.append(_doctor_check("bookmarks_file", "error", "bookmarks.json missing", data=bookmarks_snapshot))
+    elif not bookmarks_snapshot["valid_json"]:
+        checks.append(_doctor_check("bookmarks_file", "error", "bookmarks.json is invalid JSON", data=bookmarks_snapshot))
+    else:
+        checks.append(_doctor_check("bookmarks_file", "ok", "bookmarks.json readable", data=bookmarks_snapshot))
+
+    for name in ("enriched", "categorized"):
+        snapshot = status["source_state"]["files"][name]
+        if not snapshot["exists"]:
+            checks.append(_doctor_check(f"{name}_file", "warn", f"{name}.json missing", data=snapshot))
+        elif not snapshot["valid_json"]:
+            checks.append(_doctor_check(f"{name}_file", "error", f"{name}.json is invalid JSON", data=snapshot))
+        else:
+            checks.append(_doctor_check(f"{name}_file", "ok", f"{name}.json readable", data=snapshot))
+
+    severe_index_reasons = {"db_unreadable"}
+    if status["fresh"]:
+        checks.append(_doctor_check("index", "ok", "index is fresh", data={"built_at": status["built_at"]}))
+    else:
+        index_status = "error" if any(reason in severe_index_reasons for reason in status["reasons"]) else "warn"
+        checks.append(
+            _doctor_check(
+                "index",
+                index_status,
+                f"index is stale: {', '.join(status['reasons'])}",
+                data={"reasons": status["reasons"]},
+            )
+        )
+
+    if current_paths.sync_state_file.exists():
+        if sync_state_raw is None:
+            checks.append(_doctor_check("sync_state", "error", "sync-state.json is invalid JSON"))
+        else:
+            checks.append(
+                _doctor_check(
+                    "sync_state",
+                    "ok",
+                    "sync-state.json readable",
+                    data=_sync_state_summary(current_paths),
+                )
+            )
+    else:
+        checks.append(_doctor_check("sync_state", "warn", "sync-state.json missing; run sync to bootstrap local state"))
+
+    tombstones = sync_state.get("tombstones", {}) if isinstance(sync_state.get("tombstones", {}), dict) else {}
+    archive = sync_state.get("archive", {}) if isinstance(sync_state.get("archive", {}), dict) else {}
+    tombstones_missing_archive = sorted(bookmark_id for bookmark_id in tombstones if bookmark_id not in archive)
+    if tombstones_missing_archive:
+        checks.append(
+            _doctor_check(
+                "tombstones_missing_archive",
+                "error",
+                f"{len(tombstones_missing_archive)} tombstones missing archive records",
+                data={"ids": tombstones_missing_archive},
+            )
+        )
+    else:
+        checks.append(_doctor_check("tombstones_missing_archive", "ok", "all tombstones have archive records"))
+
+    tombstones_in_active = sorted(bookmark_id for bookmark_id in tombstones if bookmark_id in merged_ids)
+    if tombstones_in_active:
+        checks.append(
+            _doctor_check(
+                "tombstones_in_active_corpus",
+                "error",
+                f"{len(tombstones_in_active)} tombstoned bookmarks still present in active corpus",
+                data={"ids": tombstones_in_active},
+            )
+        )
+    else:
+        checks.append(_doctor_check("tombstones_in_active_corpus", "ok", "no tombstoned bookmarks in active corpus"))
+
+    snapshots = sync_state.get("snapshots", {}) if isinstance(sync_state.get("snapshots", {}), dict) else {}
+    drift: dict[str, int] = {}
+    for name in ("bookmarks", "enriched", "categorized"):
+        snapshot_ids = set(snapshots.get(name, {}).get("ids", []))
+        actual_ids = {
+            bookmark["id"]
+            for bookmark in (_read_json(getattr(current_paths, f"{name}_file"), strict=False) or {}).get("bookmarks", [])
+        }
+        if snapshot_ids and snapshot_ids != actual_ids:
+            drift[name] = len(snapshot_ids.symmetric_difference(actual_ids))
+    if drift:
+        checks.append(_doctor_check("snapshot_drift", "warn", "local files changed since last sync snapshot", data=drift))
+    else:
+        checks.append(_doctor_check("snapshot_drift", "ok", "snapshot ids match current files"))
+
+    errors = [check for check in checks if check["status"] == "error"]
+    warnings = [check for check in checks if check["status"] == "warn"]
+    return {
+        "ok": not errors,
+        "errors": len(errors),
+        "warnings": len(warnings),
+        "checks": checks,
+        "summary": {
+            "active_bookmarks": len(merged_ids),
+            "index_fresh": status["fresh"],
+            "tombstones": len(tombstones),
+            "archive": len(archive),
+            "built_at": status["built_at"],
+            "sync_updated_at": sync_state.get("updated_at"),
+        },
+        "status": status,
+        "source_state": source_state,
+    }
+
+
 def _parse_row(row: sqlite3.Row) -> dict:
     categories = json.loads(row["categories_json"] or "[]")
     entities = json.loads(row["entities_json"] or "[]")
@@ -916,9 +1041,98 @@ def _match_reasons(result: dict, query: str, bm25_rank: int | None, vector_rank:
     return _dedupe(reasons)
 
 
-def _result_payload(result: dict, *, score: float | None = None, bm25_rank: int | None = None, vector_rank: int | None = None, query: str | None = None) -> dict:
+def _terms_in_text(text: str, terms: list[str]) -> list[str]:
+    lowered = text.casefold()
+    return [term for term in terms if term and term in lowered]
+
+
+def _explain_payload(
+    result: dict,
+    *,
+    query: str,
+    combined_score: float,
+    bm25_rank: int | None,
+    bm25_score: float | None,
+    vector_rank: int | None,
+    vector_score: float | None,
+) -> dict:
     bookmark = result["bookmark"]
+    lowered_query = query.casefold().strip()
+    terms = _dedupe(_tokenize(query.casefold()))
+    exact_phrase = bool(lowered_query and lowered_query in result["search_text"].casefold())
+    field_values = {
+        "text": str(bookmark.get("text", "")),
+        "summary": str(bookmark.get("ai", {}).get("summary", "")),
+        "categories": " ".join(bookmark_categories(bookmark)),
+        "entities": " ".join(bookmark_entities(bookmark)),
+        "author": " ".join([str(bookmark.get("author", "")), str(bookmark.get("handle", ""))]),
+        "domains": " ".join(iter_external_domains(bookmark)),
+        "hashtags": " ".join(str(tag) for tag in bookmark.get("hashtags", [])),
+        "linked_title": " ".join(str(page.get("title", "")) for page in bookmark_link_pages(bookmark)),
+        "linked_description": " ".join(str(page.get("description", "")) for page in bookmark_link_pages(bookmark)),
+        "linked_content": "\n".join(
+            str(page.get("preview", "")).strip() or str(page.get("content", "")).strip()
+            for page in bookmark_link_pages(bookmark)
+        ),
+    }
+    matched_fields = {
+        name: matched
+        for name, value in field_values.items()
+        if (matched := _terms_in_text(value, terms))
+    }
+    matched_terms = _dedupe(term for values in matched_fields.values() for term in values)
+    matched_link_pages = []
+    for page in bookmark_link_pages(bookmark):
+        page_text = "\n".join(
+            [
+                str(page.get("title", "")),
+                str(page.get("description", "")),
+                str(page.get("preview", "")),
+                str(page.get("content", "")),
+            ]
+        )
+        page_terms = _terms_in_text(page_text, terms)
+        if page_terms:
+            matched_link_pages.append(
+                {
+                    "url": str(page.get("url", "")),
+                    "title": str(page.get("title", "")),
+                    "terms": page_terms,
+                }
+            )
+
+    bm25_rrf = (1.0 / (RRF_K + bm25_rank)) if bm25_rank is not None else 0.0
+    vector_rrf = (1.0 / (RRF_K + vector_rank)) if vector_rank is not None else 0.0
+    exact_phrase_boost = 0.01 if exact_phrase else 0.0
     return {
+        "matched_terms": matched_terms,
+        "matched_fields": matched_fields,
+        "matched_link_pages": matched_link_pages,
+        "exact_phrase": exact_phrase,
+        "rrf": {
+            "combined_score": round(combined_score, 6),
+            "bm25_rank": bm25_rank,
+            "bm25_score": round(bm25_score, 6) if bm25_score is not None else None,
+            "bm25_rrf": round(bm25_rrf, 6) if bm25_rrf else 0.0,
+            "vector_rank": vector_rank,
+            "vector_score": round(vector_score, 6) if vector_score is not None else None,
+            "vector_rrf": round(vector_rrf, 6) if vector_rrf else 0.0,
+            "exact_phrase_boost": round(exact_phrase_boost, 6),
+        },
+    }
+
+
+def _result_payload(
+    result: dict,
+    *,
+    score: float | None = None,
+    bm25_rank: int | None = None,
+    vector_rank: int | None = None,
+    query: str | None = None,
+    explain: dict | None = None,
+) -> dict:
+    bookmark = result["bookmark"]
+    payload = {
         "id": result["id"],
         "author": result["author"],
         "handle": result["handle"],
@@ -947,6 +1161,9 @@ def _result_payload(result: dict, *, score: float | None = None, bm25_rank: int 
         "deleted_at": result.get("deleted_info", {}).get("deleted_at"),
         "deletion_source": result.get("deleted_info", {}).get("source"),
     }
+    if explain is not None:
+        payload["explain"] = explain
+    return payload
 
 
 def _deleted_result_payloads(paths: IndexPaths) -> list[dict]:
@@ -1052,6 +1269,7 @@ def search_bookmarks(
     before: str | None = None,
     limit: int = 20,
     group_by: str | None = None,
+    explain: bool = False,
     auto_refresh: bool = True,
     paths: IndexPaths | None = None,
 ) -> list[dict] | dict:
@@ -1072,7 +1290,9 @@ def search_bookmarks(
         bm25 = _bm25_candidates(conn, query, filters, candidate_limit)
         vector = _vector_candidates(conn, query, filters, candidate_limit)
         bm25_ranks = {bookmark_id: rank for rank, (bookmark_id, _score) in enumerate(bm25, start=1)}
+        bm25_scores = {bookmark_id: score for bookmark_id, score in bm25}
         vector_ranks = {bookmark_id: rank for rank, (bookmark_id, _score) in enumerate(vector, start=1)}
+        vector_scores = {bookmark_id: score for bookmark_id, score in vector}
         candidate_ids = list(dict.fromkeys([bookmark_id for bookmark_id, _score in bm25] + [bookmark_id for bookmark_id, _score in vector]))
         rows = _fetch_rows_by_ids(conn, candidate_ids)
 
@@ -1094,7 +1314,26 @@ def search_bookmarks(
 
         scored.sort(key=lambda item: (item[0], item[1]["date"]), reverse=True)
         results = [
-            _result_payload(result, score=score, bm25_rank=bm25_rank, vector_rank=vector_rank, query=query)
+            _result_payload(
+                result,
+                score=score,
+                bm25_rank=bm25_rank,
+                vector_rank=vector_rank,
+                query=query,
+                explain=(
+                    _explain_payload(
+                        result,
+                        query=query,
+                        combined_score=score,
+                        bm25_rank=bm25_rank,
+                        bm25_score=bm25_scores.get(result["id"]),
+                        vector_rank=vector_rank,
+                        vector_score=vector_scores.get(result["id"]),
+                    )
+                    if explain
+                    else None
+                ),
+            )
             for score, result, bm25_rank, vector_rank in scored[:limit]
         ]
         return _group_results(results, group_by) if group_by else results
@@ -1463,6 +1702,7 @@ def format_search_results(results: list[dict] | dict) -> str:
                 why = f" [{', '.join(result['why'][:3])}]" if result.get("why") else ""
                 lines.append(f"{idx}. {meta}{why}")
                 lines.extend(_format_result_preview_lines(result))
+                lines.extend(_format_explain_lines(result))
                 lines.append(f"   {result['url']}")
         return "\n".join(lines).strip()
 
@@ -1478,6 +1718,7 @@ def format_search_results(results: list[dict] | dict) -> str:
         why = f" [{', '.join(result['why'][:3])}]" if result.get("why") else ""
         lines.append(f"{idx}. {meta}{why}")
         lines.extend(_format_result_preview_lines(result))
+        lines.extend(_format_explain_lines(result))
         lines.append(f"   {result['url']}")
     return "\n\n".join(lines)
 
@@ -1491,6 +1732,7 @@ def format_list_results(results: list[dict]) -> str:
         prefix = "[deleted] " if result.get("deleted") else ""
         lines.append(f"{prefix}{' · '.join(labels)}")
         lines.extend("  " + line[3:] if line.startswith("   ") else line for line in _format_result_preview_lines(result))
+        lines.extend("  " + line[3:] if line.startswith("   ") else line for line in _format_explain_lines(result))
         if result.get("deleted_at"):
             lines.append(f"  deleted: {result['deleted_at']} ({result.get('deletion_source') or 'unknown'})")
         if result["domains"]:
@@ -1519,6 +1761,28 @@ def _format_result_preview_lines(result: dict) -> list[str]:
         lines.append(f"   link: {linked_description}")
     elif linked_preview and linked_preview.casefold() != tweet_preview.casefold():
         lines.append(f"   link: {linked_preview}")
+    return lines
+
+
+def _format_explain_lines(result: dict) -> list[str]:
+    explain = result.get("explain")
+    if not explain:
+        return []
+    rrf = explain.get("rrf", {})
+    header_parts = [
+        f"rrf={rrf.get('combined_score')}",
+        f"bm25#{rrf.get('bm25_rank')}" if rrf.get("bm25_rank") is not None else None,
+        f"vector#{rrf.get('vector_rank')}" if rrf.get("vector_rank") is not None else None,
+    ]
+    lines = [f"   explain: {', '.join(part for part in header_parts if part)}"]
+    matched_fields = explain.get("matched_fields", {})
+    if matched_fields:
+        field_bits = [f"{name}={','.join(terms[:3])}" for name, terms in matched_fields.items()]
+        lines.append(f"   fields: {'; '.join(field_bits[:4])}")
+    matched_link_pages = explain.get("matched_link_pages", [])
+    if matched_link_pages:
+        page = matched_link_pages[0]
+        lines.append(f"   matched link: {page.get('title') or page.get('url') or '(untitled)'}")
     return lines
 
 

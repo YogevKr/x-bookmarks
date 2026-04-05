@@ -7,6 +7,7 @@ from pathlib import Path
 
 from bookmark_query import (
     collect_stats,
+    doctor_report,
     domain_counts,
     ensure_index,
     format_context_result,
@@ -203,6 +204,22 @@ def cmd_refresh(args: argparse.Namespace) -> None:
     print(f"Built at: {result['built_at']}")
 
 
+def cmd_doctor(args: argparse.Namespace) -> None:
+    report = doctor_report()
+    if args.json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return
+    print(f"OK: {report['ok']}")
+    print(
+        f"Summary: active={report['summary']['active_bookmarks']} · "
+        f"tombstones={report['summary']['tombstones']} · "
+        f"archive={report['summary']['archive']} · "
+        f"index_fresh={report['summary']['index_fresh']}"
+    )
+    for check in report["checks"]:
+        print(f"{check['status'].upper():<5} {check['name']}: {check['detail']}")
+
+
 def cmd_search(args: argparse.Namespace) -> None:
     results = search_bookmarks(
         args.query,
@@ -215,6 +232,7 @@ def cmd_search(args: argparse.Namespace) -> None:
         before=args.before,
         limit=args.limit,
         group_by=args.group_by,
+        explain=args.explain,
         auto_refresh=_auto_refresh(args),
     )
     if args.json:
@@ -372,6 +390,9 @@ def build_parser() -> argparse.ArgumentParser:
     refresh_parser.add_argument("--force", action="store_true", help="Force a full rebuild")
     refresh_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
+    doctor_parser = sub.add_parser("doctor", help="Check source files, index state, and sync-state health")
+    doctor_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
     search_parser = sub.add_parser("search", help="Hybrid search: BM25 + vector similarity + RRF")
     search_parser.add_argument("query", help="Search query")
     search_parser.add_argument("--author", help="Filter by author handle")
@@ -383,6 +404,7 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--before", help="Only include bookmarks on/before YYYY-MM-DD")
     search_parser.add_argument("--limit", type=int, default=20, help="Max results")
     search_parser.add_argument("--group-by", choices=["category", "author", "domain", "year"], help="Group results")
+    search_parser.add_argument("--explain", action="store_true", help="Show why each result matched and ranked")
     search_parser.add_argument("--json", action="store_true", help="Emit JSON")
     search_parser.add_argument("--no-refresh", action="store_true", help="Do not auto-refresh a stale index")
 
@@ -456,6 +478,7 @@ def main(argv: list[str] | None = None) -> None:
         "restore": cmd_restore,
         "status": cmd_status,
         "refresh": cmd_refresh,
+        "doctor": cmd_doctor,
         "search": cmd_search,
         "list": cmd_list,
         "show": cmd_show,

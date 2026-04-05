@@ -39,6 +39,7 @@ Notes:
 
 ```bash
 uv run x-bookmarks status
+uv run x-bookmarks doctor
 uv run x-bookmarks refresh
 uv run x-bookmarks refresh --force
 ```
@@ -47,6 +48,7 @@ uv run x-bookmarks refresh --force
 
 ```bash
 uv run x-bookmarks search "observability"
+uv run x-bookmarks search "observability" --explain
 uv run x-bookmarks search "ai" --group-by category
 uv run x-bookmarks list --author @simonw --category "AI & Machine Learning"
 uv run x-bookmarks list --deleted
@@ -62,6 +64,7 @@ uv run x-bookmarks viz
 
 Notes:
 - `search` uses hybrid retrieval: SQLite FTS5 BM25 + local vector similarity fused with RRF.
+- `search --explain` shows matched fields, matched linked pages, and the BM25/vector RRF components for each result.
 - `search`, `list`, `show`, `context`, `stats`, `domains`, and `status` support `--json`.
 - `search` supports `--group-by category|author|domain|year`.
 - `list` supports `--author`, `--category`, `--domain`, `--language`, `--type`, `--after`, and `--before`.
@@ -81,6 +84,10 @@ uv run x-bookmarks serve --port 4111
 Notes:
 - `mcp` exposes bookmark search/context/status tools over stdio.
 - `serve` exposes local JSON endpoints such as `/status`, `/search`, `/show`, and `/context`.
+
+## Diagnostics
+
+`doctor` checks local file health, index freshness, sync-state integrity, and tombstone/archive consistency.
 
 ## Categorization
 
