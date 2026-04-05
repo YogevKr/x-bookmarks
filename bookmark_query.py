@@ -87,7 +87,7 @@ def app_info() -> dict:
     if executable:
         if "/Cellar/" in executable or executable.startswith("/opt/homebrew/"):
             install_source = "homebrew"
-        elif "/.local/bin/" in executable:
+        elif "/.local/bin/" in executable or "/.local/share/uv/tools/" in executable:
             install_source = "uv"
         elif "/.venv/bin/" in executable or "/venv/bin/" in executable:
             install_source = "venv"

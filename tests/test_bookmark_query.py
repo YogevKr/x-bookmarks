@@ -2,10 +2,12 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from bookmark_query import (
     IndexPaths,
+    app_info,
     bookmark_context,
     collect_stats,
     doctor_report,
@@ -238,6 +240,13 @@ class BookmarkIndexTest(unittest.TestCase):
         self.assertEqual(stats["with_media"], 1)
         counts = domain_counts(limit=10, paths=self.paths)
         self.assertIn("opentelemetry.io", {item["domain"] for item in counts})
+
+    def test_app_info_detects_uv_tool_install(self) -> None:
+        with mock.patch("bookmark_query.sys.argv", ["/Users/yogev/.local/share/uv/tools/x-bookmarks/bin/x-bookmarks"]):
+            with mock.patch("bookmark_query.importlib_metadata.version", return_value="0.1.4"):
+                info = app_info()
+        self.assertEqual(info["install_source"], "uv")
+        self.assertEqual(info["version"], "0.1.4")
 
     def test_render_viz_contains_sections(self) -> None:
         refresh_index(paths=self.paths)
