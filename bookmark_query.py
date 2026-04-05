@@ -13,7 +13,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-BASE_DIR = Path(__file__).parent
+from bookmark_paths import resolve_base_dir
+
 INDEX_VERSION = 2
 VECTOR_DIM = 256
 RRF_K = 60
@@ -53,7 +54,7 @@ class IndexPaths:
 
 
 def default_paths() -> IndexPaths:
-    return IndexPaths(base_dir=BASE_DIR)
+    return IndexPaths(base_dir=resolve_base_dir())
 
 
 def _now_iso() -> str:

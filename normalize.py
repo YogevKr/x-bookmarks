@@ -2,10 +2,8 @@
 
 import json
 from collections import Counter
-from pathlib import Path
 
-BASE_DIR = Path(__file__).parent
-CATEGORIZED_FILE = BASE_DIR / "categorized.json"
+from bookmark_paths import resolve_base_dir
 
 # Maps messy category → canonical category.
 # Unmapped categories with count >= MIN_COUNT are kept as-is.
@@ -182,7 +180,8 @@ MERGE_MAP = {
 
 
 def run_normalization():
-    with open(CATEGORIZED_FILE) as f:
+    categorized_file = resolve_base_dir() / "categorized.json"
+    with categorized_file.open(encoding="utf-8") as f:
         data = json.load(f)
 
     changes = 0
@@ -207,7 +206,7 @@ def run_normalization():
                 seen.add(mapped)
         ai["categories"] = new_cats
 
-    with open(CATEGORIZED_FILE, "w") as f:
+    with categorized_file.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
     # Print new stats

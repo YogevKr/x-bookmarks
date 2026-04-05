@@ -7,6 +7,8 @@ Behavior:
 - `enriched.json` and `categorized.json` are derived files and are pruned against `bookmarks.json`.
 - New or removed bookmarks are reconciled on `sync`.
 - Query commands auto-refresh a stale index unless you pass `--no-refresh`.
+- The CLI reads data from the current working directory by default.
+- Set `X_BOOKMARKS_HOME=/path/to/data-dir` to target another bookmark workspace.
 
 ## Sync
 

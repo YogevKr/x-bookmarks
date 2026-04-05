@@ -4,11 +4,9 @@ import json
 import subprocess
 import sys
 import time
-from pathlib import Path
 
-BASE_DIR = Path(__file__).parent
-BOOKMARKS_FILE = BASE_DIR / "bookmarks.json"
-ENRICHED_FILE = BASE_DIR / "enriched.json"
+from bookmark_paths import resolve_base_dir
+
 MAX_EXTRACT_CHARS = 5000
 
 SKIP_DOMAINS = {"x.com", "twitter.com", "t.co"}
@@ -55,15 +53,19 @@ def extract_url(url: str) -> dict | None:
 
 
 def run_extraction():
-    with open(BOOKMARKS_FILE) as f:
+    base_dir = resolve_base_dir()
+    bookmarks_file = base_dir / "bookmarks.json"
+    enriched_file = base_dir / "enriched.json"
+
+    with bookmarks_file.open(encoding="utf-8") as f:
         data = json.load(f)
 
     bookmarks = data["bookmarks"]
 
     # Load existing enriched data for resume
     enriched_map = {}
-    if ENRICHED_FILE.exists():
-        with open(ENRICHED_FILE) as f:
+    if enriched_file.exists():
+        with enriched_file.open(encoding="utf-8") as f:
             existing = json.load(f)
         for bm in existing["bookmarks"]:
             if bm.get("extracted"):
@@ -104,16 +106,16 @@ def run_extraction():
 
         # Save progress every 20 bookmarks
         if (i + 1) % 20 == 0:
-            _save_enriched(data, bookmarks, enriched_map)
+            _save_enriched(data, bookmarks, enriched_map, enriched_file)
 
         # Rate limit
         time.sleep(0.5)
 
-    _save_enriched(data, bookmarks, enriched_map)
+    _save_enriched(data, bookmarks, enriched_map, enriched_file)
     print(f"\nDone: {extracted_count} extracted, {failed_count} failed, {len(enriched_map)} total enriched")
 
 
-def _save_enriched(data: dict, bookmarks: list, enriched_map: dict):
+def _save_enriched(data: dict, bookmarks: list, enriched_map: dict, output_file):
     enriched_bookmarks = []
     for bm in bookmarks:
         enriched = {**bm}
@@ -122,5 +124,5 @@ def _save_enriched(data: dict, bookmarks: list, enriched_map: dict):
         enriched_bookmarks.append(enriched)
 
     output = {**data, "bookmarks": enriched_bookmarks}
-    with open(ENRICHED_FILE, "w") as f:
+    with output_file.open("w", encoding="utf-8") as f:
         json.dump(output, f, indent=2, ensure_ascii=False)

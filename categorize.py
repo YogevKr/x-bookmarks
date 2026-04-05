@@ -14,10 +14,8 @@ from urllib.parse import urlparse
 
 import anthropic
 
-BASE_DIR = Path(__file__).parent
-ENRICHED_FILE = BASE_DIR / "enriched.json"
-BOOKMARKS_FILE = BASE_DIR / "bookmarks.json"
-CATEGORIZED_FILE = BASE_DIR / "categorized.json"
+from bookmark_paths import resolve_base_dir
+
 
 BATCH_SIZE = 10
 MODEL = "claude-haiku-4-5-20251001"
@@ -351,7 +349,13 @@ def classify_bookmark_regex(bookmark: dict) -> dict:
 
 
 def _load_input_data(input_file: Path | None = None) -> tuple[Path, dict, list[dict]]:
-    target = input_file or (ENRICHED_FILE if ENRICHED_FILE.exists() else BOOKMARKS_FILE)
+    if input_file is None:
+        base_dir = resolve_base_dir()
+        enriched_file = base_dir / "enriched.json"
+        bookmarks_file = base_dir / "bookmarks.json"
+        target = enriched_file if enriched_file.exists() else bookmarks_file
+    else:
+        target = input_file
     with target.open(encoding="utf-8") as handle:
         data = json.load(handle)
     return target, data, data["bookmarks"]
@@ -398,7 +402,7 @@ def run_categorization(
     input_file: Path | None = None,
     output_file: Path | None = None,
 ) -> None:
-    target_output = output_file or CATEGORIZED_FILE
+    target_output = output_file or (resolve_base_dir() / "categorized.json")
     input_path, data, bookmarks = _load_input_data(input_file=input_file)
     print(f"Reading from {input_path.name}")
 
