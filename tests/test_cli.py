@@ -1,7 +1,8 @@
+import os
 import unittest
 from unittest import mock
 
-from cli import _augment_result_with_link_context, build_parser
+from cli import _augment_result_with_link_context, _auto_refresh, build_parser
 
 
 class CliSurfaceTest(unittest.TestCase):
@@ -84,6 +85,10 @@ class CliSurfaceTest(unittest.TestCase):
         context_args = parser.parse_args(["context", "123", "--fetch-link"])
         self.assertTrue(show_args.fetch_link)
         self.assertTrue(context_args.fetch_link)
+
+    def test_read_only_env_disables_auto_refresh(self) -> None:
+        with mock.patch.dict(os.environ, {"X_BOOKMARKS_READ_ONLY": "1"}, clear=False):
+            self.assertFalse(_auto_refresh(mock.Mock(no_refresh=False)))
 
     def test_extract_parses_force_and_targeting(self) -> None:
         parser = build_parser()

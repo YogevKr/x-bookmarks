@@ -65,6 +65,34 @@ uv run x-bookmarks watch
 uv run x-bookmarks launchd install
 ```
 
+## Shared iCloud workspace
+
+One good setup:
+- SSH Mac: single writer; runs `sync` and `watch`
+- this Mac: query-only; reads the synced workspace from iCloud
+
+Writer machine:
+
+```bash
+export X_BOOKMARKS_HOME="$HOME/Library/Mobile Documents/com~apple~CloudDocs/x-bookmarks"
+x-bookmarks sync --input /path/to/bookmarks-export.json
+x-bookmarks launchd install --base-dir "$X_BOOKMARKS_HOME"
+```
+
+Query machine:
+
+```bash
+export X_BOOKMARKS_HOME="$HOME/Library/Mobile Documents/com~apple~CloudDocs/x-bookmarks"
+export X_BOOKMARKS_READ_ONLY=1
+x-bookmarks search "observability"
+x-bookmarks context 2037620876179537989
+```
+
+Notes:
+- keep one writer only; do not run `watch` or `sync` on both machines
+- read-only mode disables query auto-refresh on the second machine
+- the index is checkpointed after rebuilds so iCloud sync has less SQLite WAL churn
+
 ## Data model
 
 - `bookmarks.json`: source of truth

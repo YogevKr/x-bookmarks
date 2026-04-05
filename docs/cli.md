@@ -10,6 +10,7 @@ Behavior:
 - Query commands auto-refresh a stale index unless you pass `--no-refresh`.
 - The CLI reads data from the current working directory by default.
 - Set `X_BOOKMARKS_HOME=/path/to/data-dir` to target another bookmark workspace.
+- Set `X_BOOKMARKS_READ_ONLY=1` on a second machine to query a synced workspace without auto-refreshing it.
 
 ## Sync
 
@@ -59,6 +60,7 @@ uv run x-bookmarks watch --once --json
 Notes:
 - `watch` polls local source files and refreshes the SQLite index whenever they drift.
 - `watch` does not require a background database service; it is just a long-running CLI loop.
+- index rebuilds now checkpoint the SQLite WAL, which is friendlier for iCloud-synced workspaces.
 
 ## macOS launch agent
 
@@ -73,6 +75,14 @@ Notes:
 - `launchd install` creates a LaunchAgent that starts `x-bookmarks watch` at login.
 - The watched workspace is pinned via `X_BOOKMARKS_HOME`, so it does not depend on the shell working directory.
 - Logs go to `.x-bookmarks/watch.stdout.log` and `.x-bookmarks/watch.stderr.log` inside the watched workspace.
+- Good shared setup: install `launchd` on one Mac only, point `--base-dir` at an iCloud folder, and query that same folder from another Mac with `X_BOOKMARKS_READ_ONLY=1`.
+
+Example iCloud path:
+
+```bash
+export X_BOOKMARKS_HOME="$HOME/Library/Mobile Documents/com~apple~CloudDocs/x-bookmarks"
+uv run x-bookmarks launchd install --base-dir "$X_BOOKMARKS_HOME"
+```
 
 ## Query commands
 
@@ -108,6 +118,7 @@ Notes:
 - Terminal results now include tweet previews and linked-page context when extracted content exists, so you often do not need to open the URL.
 - `show --fetch-link` and `context --fetch-link` will extract the first external link on demand when no stored extract exists.
 - The persistent index now searches across all stored extracted link pages for a bookmark, not only the first link.
+- On a read-only query machine, set `X_BOOKMARKS_READ_ONLY=1` instead of repeating `--no-refresh` on every query.
 
 ## Agent access
 

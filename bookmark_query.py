@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from bookmark_paths import resolve_base_dir
+from bookmark_paths import read_only_mode, resolve_base_dir
 from text_repair import repair_value
 
 INDEX_VERSION = 4
@@ -418,12 +418,18 @@ def _ensure_data_dir(paths: IndexPaths) -> None:
     paths.data_dir.mkdir(parents=True, exist_ok=True)
 
 
-def _connect(paths: IndexPaths) -> sqlite3.Connection:
-    _ensure_data_dir(paths)
-    conn = sqlite3.connect(paths.index_db)
+def _connect(paths: IndexPaths, *, write: bool = False) -> sqlite3.Connection:
+    if write:
+        _ensure_data_dir(paths)
+        conn = sqlite3.connect(paths.index_db)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    else:
+        if not paths.index_db.exists():
+            raise FileNotFoundError(f"Index DB not found: {paths.index_db}")
+        uri = f"file:{paths.index_db}?mode=ro" if read_only_mode() else str(paths.index_db)
+        conn = sqlite3.connect(uri, uri=read_only_mode())
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
@@ -665,7 +671,7 @@ def _load_manifest(paths: IndexPaths) -> dict | None:
 def refresh_index(*, paths: IndexPaths | None = None, force: bool = False) -> dict:
     current_paths = paths or default_paths()
     source_state, bookmarks = _merge_bookmark_corpus(current_paths)
-    conn = _connect(current_paths)
+    conn = _connect(current_paths, write=True)
     try:
         manifest = _load_manifest(current_paths)
         rebuild_schema = force or bool(manifest and manifest.get("version") != INDEX_VERSION)
@@ -759,6 +765,7 @@ def refresh_index(*, paths: IndexPaths | None = None, force: bool = False) -> di
             "source_state": source_state,
         }
         _save_manifest(current_paths, manifest)
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return {
             "fresh": True,
             "stale": False,
@@ -814,6 +821,7 @@ def get_index_status(*, paths: IndexPaths | None = None) -> dict:
         "fresh": not stale,
         "stale": stale,
         "reasons": reasons,
+        "read_only": read_only_mode(),
         "index_db": str(current_paths.index_db),
         "manifest_path": str(current_paths.manifest_file),
         "doc_count": len(bookmarks),

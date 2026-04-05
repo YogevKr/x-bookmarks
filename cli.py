@@ -5,6 +5,7 @@ import argparse
 import json
 from pathlib import Path
 
+from bookmark_paths import read_only_mode
 from bookmark_query import (
     collect_stats,
     doctor_report,
@@ -225,6 +226,8 @@ def cmd_unhide(args: argparse.Namespace) -> None:
 
 
 def _auto_refresh(args: argparse.Namespace) -> bool:
+    if read_only_mode():
+        return False
     return not getattr(args, "no_refresh", False)
 
 
@@ -292,6 +295,7 @@ def cmd_status(args: argparse.Namespace) -> None:
     print(f"Doc count: source={status['doc_count']} indexed={status['indexed_count']}")
     print(f"Built at: {status['built_at']}")
     print(f"Base source: {status['source_state']['base']}")
+    print(f"Read-only mode: {read_only_mode()}")
     print(
         "Sync state: "
         f"tombstones={status['sync_state']['tombstone_count']} · "
