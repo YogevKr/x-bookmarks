@@ -24,7 +24,7 @@ jobs:
       asset_url: ${{ steps.meta.outputs.asset_url }}
       asset_sha256: ${{ steps.meta.outputs.asset_sha256 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -36,11 +36,11 @@ jobs:
           git fetch --force --tags origin
           git checkout "${TAG}"
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
 
       - id: meta
         name: Build sdist and compute release metadata
@@ -98,9 +98,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
 
