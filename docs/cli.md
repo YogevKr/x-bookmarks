@@ -19,6 +19,7 @@ uv run x-bookmarks extract --bookmark-id 2037620876179537989
 uv run x-bookmarks sync --input /path/to/bookmarks-export.json
 cat bookmarks-export.json | uv run x-bookmarks sync --stdin
 uv run x-bookmarks sync --reconcile-only
+uv run x-bookmarks sync --input /path/to/bookmarks-export.json --no-extract
 uv run x-bookmarks remove 2037620876179537989
 uv run x-bookmarks restore 2037620876179537989
 uv run x-bookmarks restore --all
@@ -35,7 +36,8 @@ Notes:
 - `extract --bookmark-id` lets you re-extract one bookmark without touching the whole corpus.
 - The first `sync` bootstraps local state from `bookmarks.json`.
 - Later `sync` runs detect file-side deletions in any local bookmark file, propagate them across all files, and refresh the persistent index.
-- `sync --extract`, `sync --categorize`, and `sync --regex` can continue the pipeline after import.
+- `sync` runs extraction by default; use `--no-extract` to skip link fetching on import.
+- `sync --categorize` and `sync --regex` can continue the pipeline after import.
 - `remove` deletes locally across all synced files and records a tombstone.
 - `restore` rehydrates a locally removed bookmark from the sync archive.
 - `note`, `tag`, `untag`, `rate`, `hide`, and `unhide` update local metadata on active bookmarks.

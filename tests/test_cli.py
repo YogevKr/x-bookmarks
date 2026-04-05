@@ -20,6 +20,12 @@ class CliSurfaceTest(unittest.TestCase):
         args = parser.parse_args(["sync", "--reconcile-only", "--json"])
         self.assertTrue(args.reconcile_only)
         self.assertTrue(args.json)
+        self.assertTrue(args.extract)
+
+    def test_sync_can_disable_default_extraction(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["sync", "--no-extract"])
+        self.assertFalse(args.extract)
 
     def test_search_explain_and_doctor_parse(self) -> None:
         parser = build_parser()
