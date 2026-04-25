@@ -28,6 +28,24 @@ class CliSurfaceTest(unittest.TestCase):
         args = parser.parse_args(["sync", "--no-extract"])
         self.assertFalse(args.extract)
 
+    def test_export_x_parse(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args([
+            "export-x",
+            "--sync",
+            "--no-extract",
+            "--user-data-dir",
+            "/tmp/x-profile",
+            "--debug-port",
+            "9333",
+            "--json",
+        ])
+        self.assertTrue(args.sync)
+        self.assertFalse(args.extract)
+        self.assertEqual(str(args.user_data_dir), "/tmp/x-profile")
+        self.assertEqual(args.debug_port, 9333)
+        self.assertTrue(args.json)
+
     def test_search_explain_and_doctor_parse(self) -> None:
         parser = build_parser()
         search_args = parser.parse_args(["search", "observability", "--explain"])
@@ -43,11 +61,23 @@ class CliSurfaceTest(unittest.TestCase):
     def test_launchd_parse(self) -> None:
         parser = build_parser()
         install_args = parser.parse_args(["launchd", "install", "--interval", "10", "--base-dir", "/tmp/bookmarks", "--json"])
+        export_install_args = parser.parse_args([
+            "launchd",
+            "install-export",
+            "--interval",
+            "3600",
+            "--user-data-dir",
+            "/tmp/x-profile",
+            "--json",
+        ])
         status_args = parser.parse_args(["launchd", "status", "--json"])
         uninstall_args = parser.parse_args(["launchd", "uninstall"])
         self.assertEqual(install_args.interval, 10)
         self.assertEqual(str(install_args.base_dir), "/tmp/bookmarks")
         self.assertTrue(install_args.json)
+        self.assertEqual(export_install_args.interval, 3600)
+        self.assertEqual(str(export_install_args.user_data_dir), "/tmp/x-profile")
+        self.assertTrue(export_install_args.json)
         self.assertEqual(status_args.launchd_command, "status")
         self.assertEqual(uninstall_args.launchd_command, "uninstall")
 

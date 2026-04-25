@@ -47,6 +47,7 @@ uv run x-bookmarks sync --input /path/to/bookmarks-export.json
 cat bookmarks-export.json | uv run x-bookmarks sync --stdin
 uv run x-bookmarks sync --reconcile-only
 uv run x-bookmarks sync --input /path/to/bookmarks-export.json --no-extract
+uv run x-bookmarks export-x --sync --no-extract
 uv run x-bookmarks remove 2037620876179537989
 uv run x-bookmarks restore 2037620876179537989
 uv run x-bookmarks restore --all
@@ -69,6 +70,7 @@ Notes:
 - Later `sync` runs detect file-side deletions in any local bookmark file, propagate them across all files, and refresh the persistent index.
 - `sync` runs extraction by default; use `--no-extract` to skip link fetching on import.
 - `sync --categorize` and `sync --regex` can continue the pipeline after import.
+- `export-x` runs a standalone Chrome/CDP exporter. It needs a Chrome profile logged into X, but it does not use OpenClaw, Codex, or model credentials.
 - `remove` deletes locally across all synced files and records a tombstone.
 - `restore` rehydrates a locally removed bookmark from the sync archive.
 - `note`, `tag`, `untag`, `rate`, `hide`, and `unhide` update local metadata on active bookmarks.
@@ -102,14 +104,17 @@ Notes:
 ```bash
 uv run x-bookmarks launchd install
 uv run x-bookmarks launchd install --base-dir /path/to/bookmark-workspace
+uv run x-bookmarks launchd install-export --user-data-dir ~/.x-bookmarks/chrome-profile
 uv run x-bookmarks launchd status
+uv run x-bookmarks launchd export-status
 uv run x-bookmarks launchd uninstall
 ```
 
 Notes:
 - `launchd install` creates a LaunchAgent that starts `x-bookmarks watch` at login.
+- `launchd install-export` creates a separate daily LaunchAgent that runs `x-bookmarks export-x --sync --no-extract`.
 - The watched workspace is pinned via `X_BOOKMARKS_HOME`, so it does not depend on the shell working directory.
-- Logs go to `.x-bookmarks/watch.stdout.log` and `.x-bookmarks/watch.stderr.log` inside the watched workspace.
+- Logs go to `.x-bookmarks/watch.*.log` and `.x-bookmarks/export.*.log` inside the watched workspace.
 - Good shared setup: install `launchd` on one Mac only, point it at an iCloud-backed `base_dir`, and query that same folder from another Mac with `read_only: true` in config.
 
 Example iCloud path:

@@ -12,6 +12,7 @@ from pathlib import Path
 from bookmark_paths import resolve_base_dir
 
 DEFAULT_LABEL = "com.yogevkr.x-bookmarks.watch"
+DEFAULT_EXPORT_LABEL = "com.yogevkr.x-bookmarks.export"
 
 
 def _ensure_macos() -> None:
@@ -72,6 +73,53 @@ def build_launch_agent_plist(
     }
 
 
+def build_export_launch_agent_plist(
+    *,
+    label: str = DEFAULT_EXPORT_LABEL,
+    interval: int = 24 * 60 * 60,
+    base_dir: Path | None = None,
+    user_data_dir: Path | None = None,
+    debug_port: int = 9223,
+    timeout: int = 900,
+    quiet: bool = True,
+) -> dict:
+    _ensure_macos()
+    runtime_base = (base_dir or resolve_base_dir()).expanduser().resolve()
+    data_dir = runtime_base / ".x-bookmarks"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = data_dir / "export.stdout.log"
+    stderr_path = data_dir / "export.stderr.log"
+    args = [
+        *_entrypoint_args(),
+        "export-x",
+        "--sync",
+        "--no-extract",
+        "--debug-port",
+        str(debug_port),
+        "--timeout",
+        str(timeout),
+    ]
+    if user_data_dir:
+        args.extend(["--user-data-dir", str(user_data_dir.expanduser())])
+    if quiet:
+        args.append("--quiet")
+
+    return {
+        "Label": label,
+        "ProgramArguments": args,
+        "RunAtLoad": False,
+        "StartInterval": interval,
+        "ThrottleInterval": 300,
+        "WorkingDirectory": str(runtime_base),
+        "EnvironmentVariables": {
+            "X_BOOKMARKS_HOME": str(runtime_base),
+        },
+        "StandardOutPath": str(stdout_path),
+        "StandardErrorPath": str(stderr_path),
+        "ProcessType": "Background",
+    }
+
+
 def write_launch_agent(
     *,
     label: str = DEFAULT_LABEL,
@@ -82,6 +130,32 @@ def write_launch_agent(
     plist_path = launch_agent_path(label=label)
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     payload = build_launch_agent_plist(label=label, interval=interval, base_dir=base_dir, quiet=quiet)
+    with plist_path.open("wb") as handle:
+        plistlib.dump(payload, handle, sort_keys=True)
+    return plist_path
+
+
+def write_export_launch_agent(
+    *,
+    label: str = DEFAULT_EXPORT_LABEL,
+    interval: int = 24 * 60 * 60,
+    base_dir: Path | None = None,
+    user_data_dir: Path | None = None,
+    debug_port: int = 9223,
+    timeout: int = 900,
+    quiet: bool = True,
+) -> Path:
+    plist_path = launch_agent_path(label=label)
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = build_export_launch_agent_plist(
+        label=label,
+        interval=interval,
+        base_dir=base_dir,
+        user_data_dir=user_data_dir,
+        debug_port=debug_port,
+        timeout=timeout,
+        quiet=quiet,
+    )
     with plist_path.open("wb") as handle:
         plistlib.dump(payload, handle, sort_keys=True)
     return plist_path
@@ -103,6 +177,31 @@ def install_launch_agent(
     subprocess.run(["launchctl", "bootout", _launchctl_domain(), str(plist_path)], capture_output=True, text=True)
     subprocess.run(["launchctl", "bootstrap", _launchctl_domain(), str(plist_path)], check=True, capture_output=True, text=True)
     subprocess.run(["launchctl", "kickstart", "-k", f"{_launchctl_domain()}/{label}"], capture_output=True, text=True)
+    return launch_agent_status(label=label)
+
+
+def install_export_launch_agent(
+    *,
+    label: str = DEFAULT_EXPORT_LABEL,
+    interval: int = 24 * 60 * 60,
+    base_dir: Path | None = None,
+    user_data_dir: Path | None = None,
+    debug_port: int = 9223,
+    timeout: int = 900,
+    quiet: bool = True,
+) -> dict:
+    _ensure_macos()
+    plist_path = write_export_launch_agent(
+        label=label,
+        interval=interval,
+        base_dir=base_dir,
+        user_data_dir=user_data_dir,
+        debug_port=debug_port,
+        timeout=timeout,
+        quiet=quiet,
+    )
+    subprocess.run(["launchctl", "bootout", _launchctl_domain(), str(plist_path)], capture_output=True, text=True)
+    subprocess.run(["launchctl", "bootstrap", _launchctl_domain(), str(plist_path)], check=True, capture_output=True, text=True)
     return launch_agent_status(label=label)
 
 

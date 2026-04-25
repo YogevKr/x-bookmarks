@@ -57,7 +57,9 @@ def cmd_watch(args: argparse.Namespace) -> None:
 
 def cmd_launchd(args: argparse.Namespace) -> None:
     from bookmark_launchd import (
+        DEFAULT_EXPORT_LABEL,
         install_launch_agent,
+        install_export_launch_agent,
         launch_agent_status,
         uninstall_launch_agent,
     )
@@ -69,8 +71,22 @@ def cmd_launchd(args: argparse.Namespace) -> None:
             base_dir=args.base_dir,
             quiet=not args.verbose,
         )
+    elif args.launchd_command == "install-export":
+        _require_writable("launchd install-export")
+        result = install_export_launch_agent(
+            interval=args.interval,
+            base_dir=args.base_dir,
+            user_data_dir=args.user_data_dir,
+            debug_port=args.debug_port,
+            timeout=args.timeout,
+            quiet=not args.verbose,
+        )
     elif args.launchd_command == "uninstall":
         result = uninstall_launch_agent()
+    elif args.launchd_command == "uninstall-export":
+        result = uninstall_launch_agent(label=DEFAULT_EXPORT_LABEL)
+    elif args.launchd_command == "export-status":
+        result = launch_agent_status(label=DEFAULT_EXPORT_LABEL)
     else:
         result = launch_agent_status()
 
@@ -150,6 +166,49 @@ def cmd_sync(args: argparse.Namespace) -> None:
         f"restored={result['bidirectional']['restored']}"
     )
     print(f"Index: {result['index']['doc_count']} docs @ {result['index']['index_db']}")
+
+
+def cmd_export_x(args: argparse.Namespace) -> None:
+    _require_writable("export-x")
+    from bookmark_export import export_and_sync_x_bookmarks, export_x_bookmarks
+
+    if args.sync:
+        result = export_and_sync_x_bookmarks(
+            output=args.output,
+            user_data_dir=args.user_data_dir,
+            chrome_path=args.chrome_path,
+            debug_port=args.debug_port,
+            timeout_seconds=args.timeout,
+            stagnant_rounds=args.stagnant_rounds,
+            headless=args.headless,
+            run_extract=args.extract,
+            run_categorize=args.categorize or args.regex,
+            use_regex=args.regex,
+            quiet=args.quiet or args.json,
+        )
+    else:
+        result = export_x_bookmarks(
+            output=args.output,
+            user_data_dir=args.user_data_dir,
+            chrome_path=args.chrome_path,
+            debug_port=args.debug_port,
+            timeout_seconds=args.timeout,
+            stagnant_rounds=args.stagnant_rounds,
+            headless=args.headless,
+            quiet=args.quiet or args.json,
+        )
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    export_result = result["export"] if args.sync else result
+    print(f"Exported: {export_result['count']} bookmarks -> {export_result['output']}")
+    print(f"Profile: {export_result['profile']}")
+    if args.sync:
+        sync_result = result["sync"]
+        print(
+            f"Synced: {sync_result['bookmarks']['previous']} -> {sync_result['bookmarks']['current']} "
+            f"(removed {sync_result['bookmarks']['removed']})"
+        )
 
 
 def cmd_remove(args: argparse.Namespace) -> None:
@@ -652,6 +711,23 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument("--regex", action="store_true", help="Run regex categorization after sync")
     sync_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
+    export_x_parser = sub.add_parser("export-x", help="Export bookmarks from X using a standalone Chrome profile")
+    export_x_parser.add_argument("--output", type=Path, help="Where to write exported bookmarks JSON")
+    export_x_parser.add_argument("--sync", action="store_true", help="Import the export into bookmarks.json after capture")
+    export_x_parser.set_defaults(extract=False)
+    export_x_parser.add_argument("--extract", dest="extract", action="store_true", help="Run link extraction after sync")
+    export_x_parser.add_argument("--no-extract", dest="extract", action="store_false", help="Skip link extraction after sync (default)")
+    export_x_parser.add_argument("--categorize", action="store_true", help="Run Claude categorization after sync")
+    export_x_parser.add_argument("--regex", action="store_true", help="Run regex categorization after sync")
+    export_x_parser.add_argument("--user-data-dir", type=Path, help="Chrome profile directory to use for X login")
+    export_x_parser.add_argument("--chrome-path", type=Path, help="Path to Google Chrome executable")
+    export_x_parser.add_argument("--debug-port", type=int, default=9223, help="Chrome remote debugging port")
+    export_x_parser.add_argument("--timeout", type=int, default=900, help="Maximum export runtime in seconds")
+    export_x_parser.add_argument("--stagnant-rounds", type=int, default=8, help="Stop after this many scrolls without new bookmarks")
+    export_x_parser.add_argument("--headless", action="store_true", help="Run Chrome headless")
+    export_x_parser.add_argument("--quiet", action="store_true", help="Suppress exporter progress logs")
+    export_x_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
     remove_parser = sub.add_parser("remove", help="Remove bookmarks locally and propagate to all synced files")
     remove_parser.add_argument("ids", nargs="+", help="Bookmark ids")
     remove_parser.add_argument("--json", action="store_true", help="Emit JSON")
@@ -733,6 +809,18 @@ def build_parser() -> argparse.ArgumentParser:
     launchd_status.add_argument("--json", action="store_true", help="Emit JSON")
     launchd_uninstall = launchd_sub.add_parser("uninstall", help="Unload and remove the LaunchAgent")
     launchd_uninstall.add_argument("--json", action="store_true", help="Emit JSON")
+    launchd_export_install = launchd_sub.add_parser("install-export", help="Install and start the X export LaunchAgent")
+    launchd_export_install.add_argument("--interval", type=int, default=86400, help="Export interval in seconds")
+    launchd_export_install.add_argument("--base-dir", type=Path, help="Bookmark workspace to sync into")
+    launchd_export_install.add_argument("--user-data-dir", type=Path, help="Chrome profile directory to use for X login")
+    launchd_export_install.add_argument("--debug-port", type=int, default=9223, help="Chrome remote debugging port")
+    launchd_export_install.add_argument("--timeout", type=int, default=900, help="Maximum export runtime in seconds")
+    launchd_export_install.add_argument("--verbose", action="store_true", help="Write exporter progress logs to stderr")
+    launchd_export_install.add_argument("--json", action="store_true", help="Emit JSON")
+    launchd_export_status = launchd_sub.add_parser("export-status", help="Show X export LaunchAgent status")
+    launchd_export_status.add_argument("--json", action="store_true", help="Emit JSON")
+    launchd_export_uninstall = launchd_sub.add_parser("uninstall-export", help="Unload and remove the X export LaunchAgent")
+    launchd_export_uninstall.add_argument("--json", action="store_true", help="Emit JSON")
 
     doctor_parser = sub.add_parser("doctor", help="Check source files, index state, and sync-state health")
     doctor_parser.add_argument("--json", action="store_true", help="Emit JSON")
@@ -843,6 +931,7 @@ def main(argv: list[str] | None = None) -> None:
         "normalize": cmd_normalize,
         "all": cmd_all,
         "sync": cmd_sync,
+        "export-x": cmd_export_x,
         "remove": cmd_remove,
         "restore": cmd_restore,
         "note": cmd_note,

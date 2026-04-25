@@ -147,7 +147,7 @@ All corpus data is intentionally local-only and ignored by git.
 - local delete/restore, notes, tags, ratings, and hidden state
 - metadata export/import for local notes, tags, ratings, and hidden state
 - stdio MCP server and local HTTP API
-- watch mode and macOS launch-at-login support via `launchd`
+- standalone X export, watch mode, and macOS launch-at-login support via `launchd`
 - optional Claude-based categorization via the `ai` extra
 
 ## CLI docs

@@ -29,6 +29,7 @@ py-modules = [
     "cli",
     "bookmark_mcp",
     "bookmark_paths",
+    "bookmark_export",
     "bookmark_query",
     "bookmark_serve",
     "bookmark_sync",
