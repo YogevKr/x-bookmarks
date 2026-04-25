@@ -89,12 +89,14 @@ uv run x-bookmarks refresh
 uv run x-bookmarks refresh --force
 uv run x-bookmarks watch
 uv run x-bookmarks watch --once --json
+uv run x-bookmarks stale-check --max-age-hours 36
 ```
 
 Notes:
 - `watch` polls local source files and refreshes the SQLite index whenever they drift.
 - `watch` does not require a background database service; it is just a long-running CLI loop.
 - `watch` now persists a heartbeat in `.x-bookmarks/watch-state.json`.
+- `stale-check` fails with exit code 2 when the source X export is older than the configured threshold.
 - `extract-failures` lists cached extraction misses with domain, attempts, and terminal/retryable state.
 - `retry-failures` reruns those stored misses, and `--terminal` includes failures previously marked terminal.
 - index rebuilds now checkpoint the SQLite WAL, which is friendlier for iCloud-synced workspaces.
@@ -105,16 +107,19 @@ Notes:
 uv run x-bookmarks launchd install
 uv run x-bookmarks launchd install --base-dir /path/to/bookmark-workspace
 uv run x-bookmarks launchd install-export --user-data-dir ~/.x-bookmarks/chrome-profile
+uv run x-bookmarks launchd install-stale-check --max-age-hours 36
 uv run x-bookmarks launchd status
 uv run x-bookmarks launchd export-status
+uv run x-bookmarks launchd stale-check-status
 uv run x-bookmarks launchd uninstall
 ```
 
 Notes:
 - `launchd install` creates a LaunchAgent that starts `x-bookmarks watch` at login.
 - `launchd install-export` creates a separate daily LaunchAgent that runs `x-bookmarks export-x --sync --no-extract`.
+- `launchd install-stale-check` creates a separate LaunchAgent that runs `x-bookmarks stale-check --notify`.
 - The watched workspace is pinned via `X_BOOKMARKS_HOME`, so it does not depend on the shell working directory.
-- Logs go to `.x-bookmarks/watch.*.log` and `.x-bookmarks/export.*.log` inside the watched workspace.
+- Logs go to `.x-bookmarks/watch.*.log`, `.x-bookmarks/export.*.log`, and `.x-bookmarks/stale-check.*.log` inside the watched workspace.
 - Good shared setup: install `launchd` on one Mac only, point it at an iCloud-backed `base_dir`, and query that same folder from another Mac with `read_only: true` in config.
 
 Example iCloud path:

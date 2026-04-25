@@ -55,11 +55,29 @@ def cmd_watch(args: argparse.Namespace) -> None:
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
+def cmd_stale_check(args: argparse.Namespace) -> None:
+    from bookmark_alert import check_stale_source_export
+
+    result = check_stale_source_export(
+        max_age_hours=args.max_age_hours,
+        notify=args.notify,
+        alert_every_hours=args.alert_every_hours,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    elif not args.quiet or not result["ok"]:
+        print(result["message"])
+    if not result["ok"]:
+        raise SystemExit(2)
+
+
 def cmd_launchd(args: argparse.Namespace) -> None:
     from bookmark_launchd import (
         DEFAULT_EXPORT_LABEL,
+        DEFAULT_STALE_CHECK_LABEL,
         install_launch_agent,
         install_export_launch_agent,
+        install_stale_check_launch_agent,
         launch_agent_status,
         uninstall_launch_agent,
     )
@@ -81,12 +99,24 @@ def cmd_launchd(args: argparse.Namespace) -> None:
             timeout=args.timeout,
             quiet=not args.verbose,
         )
+    elif args.launchd_command == "install-stale-check":
+        result = install_stale_check_launch_agent(
+            interval=args.interval,
+            base_dir=args.base_dir,
+            max_age_hours=args.max_age_hours,
+            alert_every_hours=args.alert_every_hours,
+            quiet=not args.verbose,
+        )
     elif args.launchd_command == "uninstall":
         result = uninstall_launch_agent()
     elif args.launchd_command == "uninstall-export":
         result = uninstall_launch_agent(label=DEFAULT_EXPORT_LABEL)
+    elif args.launchd_command == "uninstall-stale-check":
+        result = uninstall_launch_agent(label=DEFAULT_STALE_CHECK_LABEL)
     elif args.launchd_command == "export-status":
         result = launch_agent_status(label=DEFAULT_EXPORT_LABEL)
+    elif args.launchd_command == "stale-check-status":
+        result = launch_agent_status(label=DEFAULT_STALE_CHECK_LABEL)
     else:
         result = launch_agent_status()
 
@@ -798,6 +828,13 @@ def build_parser() -> argparse.ArgumentParser:
     watch_parser.add_argument("--quiet", action="store_true", help="Suppress periodic status lines")
     watch_parser.add_argument("--json", action="store_true", help="Emit JSON for --once")
 
+    stale_check_parser = sub.add_parser("stale-check", help="Check whether the source X export is stale")
+    stale_check_parser.add_argument("--max-age-hours", type=float, default=36.0, help="Alert threshold in hours")
+    stale_check_parser.add_argument("--notify", action="store_true", help="Show a macOS notification when stale")
+    stale_check_parser.add_argument("--alert-every-hours", type=float, default=24.0, help="Minimum hours between stale alerts")
+    stale_check_parser.add_argument("--quiet", action="store_true", help="Suppress fresh status output")
+    stale_check_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
     launchd_parser = sub.add_parser("launchd", help="Manage a macOS launch agent for watch mode")
     launchd_sub = launchd_parser.add_subparsers(dest="launchd_command", required=True)
     launchd_install = launchd_sub.add_parser("install", help="Install and start the watch LaunchAgent")
@@ -821,6 +858,17 @@ def build_parser() -> argparse.ArgumentParser:
     launchd_export_status.add_argument("--json", action="store_true", help="Emit JSON")
     launchd_export_uninstall = launchd_sub.add_parser("uninstall-export", help="Unload and remove the X export LaunchAgent")
     launchd_export_uninstall.add_argument("--json", action="store_true", help="Emit JSON")
+    launchd_stale_install = launchd_sub.add_parser("install-stale-check", help="Install the stale export alert LaunchAgent")
+    launchd_stale_install.add_argument("--interval", type=int, default=21600, help="Check interval in seconds")
+    launchd_stale_install.add_argument("--base-dir", type=Path, help="Bookmark workspace to check")
+    launchd_stale_install.add_argument("--max-age-hours", type=float, default=36.0, help="Alert threshold in hours")
+    launchd_stale_install.add_argument("--alert-every-hours", type=float, default=24.0, help="Minimum hours between stale alerts")
+    launchd_stale_install.add_argument("--verbose", action="store_true", help="Write fresh status output to stdout")
+    launchd_stale_install.add_argument("--json", action="store_true", help="Emit JSON")
+    launchd_stale_status = launchd_sub.add_parser("stale-check-status", help="Show stale export alert LaunchAgent status")
+    launchd_stale_status.add_argument("--json", action="store_true", help="Emit JSON")
+    launchd_stale_uninstall = launchd_sub.add_parser("uninstall-stale-check", help="Unload and remove the stale export alert LaunchAgent")
+    launchd_stale_uninstall.add_argument("--json", action="store_true", help="Emit JSON")
 
     doctor_parser = sub.add_parser("doctor", help="Check source files, index state, and sync-state health")
     doctor_parser.add_argument("--json", action="store_true", help="Emit JSON")
@@ -945,6 +993,7 @@ def main(argv: list[str] | None = None) -> None:
         "config": cmd_config,
         "refresh": cmd_refresh,
         "watch": cmd_watch,
+        "stale-check": cmd_stale_check,
         "launchd": cmd_launchd,
         "doctor": cmd_doctor,
         "extract-failures": cmd_extract_failures,

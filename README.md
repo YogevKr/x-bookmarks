@@ -71,7 +71,10 @@ Agent surfaces:
 uv run x-bookmarks mcp
 uv run x-bookmarks serve --port 4111
 uv run x-bookmarks watch
+uv run x-bookmarks stale-check --max-age-hours 36
 uv run x-bookmarks launchd install
+uv run x-bookmarks launchd install-export
+uv run x-bookmarks launchd install-stale-check
 ```
 
 Portable local metadata:
@@ -147,7 +150,7 @@ All corpus data is intentionally local-only and ignored by git.
 - local delete/restore, notes, tags, ratings, and hidden state
 - metadata export/import for local notes, tags, ratings, and hidden state
 - stdio MCP server and local HTTP API
-- standalone X export, watch mode, and macOS launch-at-login support via `launchd`
+- standalone X export, stale export alerting, watch mode, and macOS launch-at-login support via `launchd`
 - optional Claude-based categorization via the `ai` extra
 
 ## CLI docs

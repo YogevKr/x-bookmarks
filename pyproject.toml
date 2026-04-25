@@ -25,6 +25,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 py-modules = [
+    "bookmark_alert",
     "bookmark_launchd",
     "cli",
     "bookmark_mcp",

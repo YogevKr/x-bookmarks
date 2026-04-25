@@ -5,7 +5,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-from bookmark_launchd import _entrypoint_args, build_export_launch_agent_plist, build_launch_agent_plist, launch_agent_path
+from bookmark_launchd import (
+    _entrypoint_args,
+    build_export_launch_agent_plist,
+    build_launch_agent_plist,
+    build_stale_check_launch_agent_plist,
+    install_stale_check_launch_agent,
+    launch_agent_path,
+)
 
 
 class LaunchdTest(unittest.TestCase):
@@ -75,3 +82,44 @@ class LaunchdTest(unittest.TestCase):
                 "--quiet",
             ],
         )
+
+    def test_build_stale_check_launch_agent_plist(self) -> None:
+        with TemporaryDirectory() as tmp:
+            base_dir = Path(tmp) / "base"
+            with mock.patch("bookmark_launchd.sys.platform", "darwin"):
+                with mock.patch("bookmark_launchd._entrypoint_args", return_value=["/usr/local/bin/x-bookmarks"]):
+                    payload = build_stale_check_launch_agent_plist(
+                        base_dir=base_dir,
+                        interval=7200,
+                        max_age_hours=40,
+                        alert_every_hours=12,
+                        quiet=True,
+                    )
+        self.assertEqual(payload["Label"], "com.yogevkr.x-bookmarks.stale-check")
+        self.assertEqual(payload["StartInterval"], 7200)
+        self.assertEqual(payload["ThrottleInterval"], 300)
+        self.assertEqual(
+            payload["ProgramArguments"],
+            [
+                "/usr/local/bin/x-bookmarks",
+                "stale-check",
+                "--max-age-hours",
+                "40",
+                "--alert-every-hours",
+                "12",
+                "--notify",
+                "--quiet",
+            ],
+        )
+
+    def test_install_stale_check_does_not_kickstart(self) -> None:
+        with mock.patch("bookmark_launchd.sys.platform", "darwin"):
+            with mock.patch("bookmark_launchd.write_stale_check_launch_agent", return_value=Path("/tmp/stale.plist")):
+                with mock.patch("bookmark_launchd._launchctl_domain", return_value="gui/501"):
+                    with mock.patch("bookmark_launchd.launch_agent_status", return_value={"loaded": True}):
+                        with mock.patch("bookmark_launchd.subprocess.run") as run:
+                            install_stale_check_launch_agent()
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(commands[0][:2], ["launchctl", "bootout"])
+        self.assertEqual(commands[1][:2], ["launchctl", "bootstrap"])
+        self.assertFalse(any("kickstart" in command for command in commands))
