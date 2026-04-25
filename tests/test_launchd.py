@@ -18,6 +18,7 @@ class LaunchdTest(unittest.TestCase):
         self.assertEqual(payload["EnvironmentVariables"]["X_BOOKMARKS_HOME"], str(base_dir.resolve()))
         self.assertEqual(payload["ProgramArguments"], ["/usr/local/bin/x-bookmarks", "watch", "--interval", "9", "--quiet"])
         self.assertEqual(payload["WorkingDirectory"], str(base_dir.resolve()))
+        self.assertEqual(payload["ThrottleInterval"], 30)
 
     def test_launch_agent_path_uses_launchagents_dir(self) -> None:
         path = launch_agent_path()

@@ -108,7 +108,7 @@ def _read_json(path: Path, *, strict: bool = True) -> dict | None:
     try:
         with path.open(encoding="utf-8") as handle:
             return repair_value(json.load(handle))
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, OSError):
         if strict:
             raise
         return None

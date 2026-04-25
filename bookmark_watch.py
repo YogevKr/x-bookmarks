@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from bookmark_query import IndexPaths, default_paths, get_index_status, refresh_index
+from bookmark_query import INDEX_VERSION, IndexPaths, default_paths, get_index_status, refresh_index
 
 
 @dataclass
@@ -24,21 +24,109 @@ def _now_iso() -> str:
 def _load_watch_state(paths: IndexPaths) -> dict:
     if not paths.watch_state_file.exists():
         return {}
-    with paths.watch_state_file.open(encoding="utf-8") as handle:
-        return json.load(handle)
+    try:
+        with paths.watch_state_file.open(encoding="utf-8") as handle:
+            return json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return {}
 
 
 def _save_watch_state(paths: IndexPaths, payload: dict) -> None:
     paths.data_dir.mkdir(parents=True, exist_ok=True)
     previous = _load_watch_state(paths)
     merged = {**previous, **payload}
-    with paths.watch_state_file.open("w", encoding="utf-8") as handle:
-        json.dump(merged, handle, indent=2, ensure_ascii=False)
-        handle.write("\n")
+    temporary_path = paths.watch_state_file.with_suffix(".json.tmp")
+    try:
+        with temporary_path.open("w", encoding="utf-8") as handle:
+            json.dump(merged, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+        temporary_path.replace(paths.watch_state_file)
+    except OSError:
+        return
+
+
+def _load_manifest(paths: IndexPaths) -> dict | None:
+    if not paths.manifest_file.exists():
+        return None
+    try:
+        with paths.manifest_file.open(encoding="utf-8") as handle:
+            return json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _source_mtime_signature(paths: IndexPaths) -> dict | None:
+    signature = {}
+    for name, path in (
+        ("bookmarks", paths.bookmarks_file),
+        ("enriched", paths.enriched_file),
+        ("categorized", paths.categorized_file),
+    ):
+        try:
+            if path.exists():
+                signature[name] = {"exists": True, "mtime_ns": path.stat().st_mtime_ns}
+            else:
+                signature[name] = {"exists": False, "mtime_ns": None}
+        except OSError:
+            return None
+    return signature
+
+
+def _manifest_mtime_signature(manifest: dict) -> dict:
+    files = (manifest.get("source_state") or {}).get("files") or {}
+    return {
+        name: {
+            "exists": bool((files.get(name) or {}).get("exists")),
+            "mtime_ns": (files.get(name) or {}).get("mtime_ns"),
+        }
+        for name in ("bookmarks", "enriched", "categorized")
+    }
+
+
+def _quick_idle_status(paths: IndexPaths) -> dict | None:
+    if not paths.index_db.exists():
+        return None
+
+    manifest = _load_manifest(paths)
+    if not manifest or manifest.get("version") != INDEX_VERSION:
+        return None
+
+    current_signature = _source_mtime_signature(paths)
+    if current_signature is None or current_signature != _manifest_mtime_signature(manifest):
+        return None
+
+    return {
+        "action": "idle",
+        "fresh": True,
+        "stale": False,
+        "reasons": [],
+        "index_db": str(paths.index_db),
+        "manifest_path": str(paths.manifest_file),
+        "doc_count": manifest.get("doc_count"),
+        "indexed_count": manifest.get("doc_count"),
+        "source_state": manifest.get("source_state"),
+        "watch_state": _load_watch_state(paths),
+        "built_at": manifest.get("built_at"),
+        "rebuilt": False,
+    }
 
 
 def watch_once(*, paths: IndexPaths | None = None, force: bool = False) -> dict:
     current_paths = paths or default_paths()
+    if not force:
+        quick_status = _quick_idle_status(current_paths)
+        if quick_status is not None:
+            _save_watch_state(
+                current_paths,
+                {
+                    "pid": os.getpid(),
+                    "last_watch_tick": _now_iso(),
+                    "last_action": quick_status["action"],
+                    "last_error": None,
+                },
+            )
+            return quick_status
+
     try:
         status = get_index_status(paths=current_paths)
     except FileNotFoundError:

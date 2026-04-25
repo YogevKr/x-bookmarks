@@ -61,6 +61,7 @@ def build_launch_agent_plist(
         "ProgramArguments": args,
         "RunAtLoad": True,
         "KeepAlive": True,
+        "ThrottleInterval": 30,
         "WorkingDirectory": str(runtime_base),
         "EnvironmentVariables": {
             "X_BOOKMARKS_HOME": str(runtime_base),
