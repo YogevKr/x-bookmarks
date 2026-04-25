@@ -1,10 +1,11 @@
 import plistlib
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-from bookmark_launchd import build_export_launch_agent_plist, build_launch_agent_plist, launch_agent_path
+from bookmark_launchd import _entrypoint_args, build_export_launch_agent_plist, build_launch_agent_plist, launch_agent_path
 
 
 class LaunchdTest(unittest.TestCase):
@@ -23,6 +24,13 @@ class LaunchdTest(unittest.TestCase):
     def test_launch_agent_path_uses_launchagents_dir(self) -> None:
         path = launch_agent_path()
         self.assertTrue(str(path).endswith("/Library/LaunchAgents/com.yogevkr.x-bookmarks.watch.plist"))
+
+    def test_entrypoint_prefers_absolute_current_x_bookmarks(self) -> None:
+        with TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "x-bookmarks"
+            executable.touch()
+            with mock.patch.object(sys, "argv", [str(executable)]):
+                self.assertEqual(_entrypoint_args(), [str(executable)])
 
     def test_plist_round_trip(self) -> None:
         with TemporaryDirectory() as tmp:

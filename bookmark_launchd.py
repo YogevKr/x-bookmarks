@@ -30,6 +30,8 @@ def launch_agent_path(*, label: str = DEFAULT_LABEL) -> Path:
 
 def _entrypoint_args() -> list[str]:
     argv0 = Path(sys.argv[0]).expanduser()
+    if argv0.is_absolute() and argv0.name == "x-bookmarks" and argv0.exists():
+        return [str(argv0)]
     if argv0.name == "x-bookmarks":
         resolved = shutil.which("x-bookmarks")
         if resolved:
