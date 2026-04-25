@@ -171,6 +171,20 @@ class BookmarkIndexTest(unittest.TestCase):
         status = get_index_status(paths=self.paths)
         self.assertTrue(status["fresh"])
         self.assertIn("sync_state", status)
+        self.assertIn("source_freshness", status)
+
+    def test_status_reports_stale_source_export(self) -> None:
+        stale_payload = {**BOOKMARKS, "exportDate": "2000-01-01T00:00:00Z"}
+        (self.base / "bookmarks.json").write_text(json.dumps(stale_payload, ensure_ascii=False), encoding="utf-8")
+
+        status = get_index_status(paths=self.paths)
+        self.assertEqual(status["source_freshness"]["source_exported_at"], "2000-01-01T00:00:00+00:00")
+        self.assertTrue(status["source_freshness"]["stale"])
+
+        report = doctor_report(paths=self.paths)
+        self.assertTrue(
+            any(check["name"] == "source_freshness" and check["status"] == "warn" for check in report["checks"])
+        )
 
     def test_search_bookmarks_hybrid(self) -> None:
         results = search_bookmarks("observability", limit=5, paths=self.paths)

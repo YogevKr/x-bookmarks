@@ -27,6 +27,7 @@ SKIP_DOMAINS = {"x.com", "twitter.com", "t.co"}
 TEXT_TRANSLATION = str.maketrans({"\n": " ", "\r": " ", "\t": " "})
 SPARKS = "▁▂▃▄▅▆▇█"
 BLOCK = "█"
+SOURCE_STALE_AFTER_SECONDS = 7 * 24 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,25 @@ def _now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    normalized = str(value).strip()
+    if normalized.endswith("Z"):
+        normalized = f"{normalized[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _mtime_iso(path: Path) -> str:
+    return datetime.fromtimestamp(path.stat().st_mtime, UTC).replace(microsecond=0).isoformat()
+
+
 def _read_json(path: Path, *, strict: bool = True) -> dict | None:
     if not path.exists():
         return None
@@ -173,13 +193,38 @@ def _file_snapshot(path: Path) -> dict:
 
     data = _read_json(path, strict=False)
     bookmark_count = len(data.get("bookmarks", [])) if data else None
+    export_date = data.get("exportDate") if isinstance(data, dict) else None
+    source = data.get("source") if isinstance(data, dict) else None
+    total_bookmarks = data.get("totalBookmarks") if isinstance(data, dict) else None
     return {
         "exists": True,
         "path": str(path),
         "sha256": _sha256(path),
         "mtime_ns": path.stat().st_mtime_ns,
+        "modified_at": _mtime_iso(path),
+        "export_date": export_date,
+        "source": source,
+        "declared_total_bookmarks": total_bookmarks,
         "bookmark_count": bookmark_count,
         "valid_json": data is not None,
+    }
+
+
+def _source_freshness_summary(source_state: dict) -> dict:
+    bookmark_snapshot = source_state.get("files", {}).get("bookmarks", {})
+    exported_at = _parse_iso_datetime(bookmark_snapshot.get("export_date"))
+    modified_at = _parse_iso_datetime(bookmark_snapshot.get("modified_at"))
+    reference_at = exported_at or modified_at
+    age_seconds = None
+    if reference_at:
+        age_seconds = max(0, int((datetime.now(UTC) - reference_at).total_seconds()))
+    return {
+        "source_exported_at": exported_at.isoformat() if exported_at else None,
+        "source_modified_at": modified_at.isoformat() if modified_at else None,
+        "reference_at": reference_at.isoformat() if reference_at else None,
+        "age_seconds": age_seconds,
+        "stale_after_seconds": SOURCE_STALE_AFTER_SECONDS,
+        "stale": age_seconds is not None and age_seconds > SOURCE_STALE_AFTER_SECONDS,
     }
 
 
@@ -885,6 +930,7 @@ def get_index_status(*, paths: IndexPaths | None = None) -> dict:
     manifest = _load_manifest(current_paths)
     sync_state = _sync_state_summary(current_paths)
     watch_state = _watch_state_summary(current_paths)
+    source_freshness = _source_freshness_summary(source_state)
     db_exists = current_paths.index_db.exists()
     reasons: list[str] = []
 
@@ -927,6 +973,7 @@ def get_index_status(*, paths: IndexPaths | None = None) -> dict:
         "doc_count": len(bookmarks),
         "indexed_count": indexed_count,
         "source_state": source_state,
+        "source_freshness": source_freshness,
         "sync_state": sync_state,
         "watch_state": watch_state,
         "built_at": manifest.get("built_at") if manifest else None,
@@ -947,6 +994,7 @@ def doctor_report(*, paths: IndexPaths | None = None) -> dict:
     sync_state_raw = _read_json(current_paths.sync_state_file, strict=False)
     sync_state = sync_state_raw or {}
     source_state, merged_bookmarks = _merge_bookmark_corpus(current_paths)
+    source_freshness = status.get("source_freshness", {})
     merged_ids = {bookmark["id"] for bookmark in merged_bookmarks}
     checks: list[dict] = []
 
@@ -980,6 +1028,19 @@ def doctor_report(*, paths: IndexPaths | None = None) -> dict:
                 data={"reasons": status["reasons"]},
             )
         )
+
+    if source_freshness.get("stale"):
+        stale_days = SOURCE_STALE_AFTER_SECONDS // (24 * 60 * 60)
+        checks.append(
+            _doctor_check(
+                "source_freshness",
+                "warn",
+                f"bookmarks source export is older than {stale_days} days",
+                data=source_freshness,
+            )
+        )
+    else:
+        checks.append(_doctor_check("source_freshness", "ok", "bookmarks source freshness is within threshold", data=source_freshness))
 
     if current_paths.sync_state_file.exists():
         if sync_state_raw is None:
@@ -1053,6 +1114,9 @@ def doctor_report(*, paths: IndexPaths | None = None) -> dict:
             "archive": len(archive),
             "built_at": status["built_at"],
             "sync_updated_at": sync_state.get("updated_at"),
+            "source_exported_at": source_freshness.get("source_exported_at"),
+            "source_modified_at": source_freshness.get("source_modified_at"),
+            "source_age_seconds": source_freshness.get("age_seconds"),
         },
         "status": status,
         "source_state": source_state,

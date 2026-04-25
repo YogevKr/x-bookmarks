@@ -328,6 +328,14 @@ def cmd_status(args: argparse.Namespace) -> None:
     print(f"Doc count: source={status['doc_count']} indexed={status['indexed_count']}")
     print(f"Built at: {status['built_at']}")
     print(f"Base source: {status['source_state']['base']}")
+    source_freshness = status.get("source_freshness", {})
+    print(
+        "Source freshness: "
+        f"exported_at={source_freshness.get('source_exported_at')} · "
+        f"modified_at={source_freshness.get('source_modified_at')} · "
+        f"age_seconds={source_freshness.get('age_seconds')} · "
+        f"stale={source_freshness.get('stale')}"
+    )
     print(f"Read-only mode: {read_only_mode()}")
     print(
         "Sync state: "
